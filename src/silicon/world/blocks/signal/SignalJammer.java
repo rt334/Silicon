@@ -5,11 +5,9 @@ import arc.math.Mathf;
 import arc.scene.ui.ButtonGroup;
 import arc.scene.ui.TextButton;
 import arc.scene.ui.layout.Table;
-import arc.struct.ObjectMap;
 import arc.struct.Seq;
 import arc.util.io.Reads;
 import arc.util.io.Writes;
-import mindustry.game.Team;
 import mindustry.gen.Building;
 import mindustry.gen.Groups;
 import mindustry.ui.Styles;
@@ -44,8 +42,8 @@ public class SignalJammer extends Block {
         stats.add(Stat.powerRange, SignalSource.RADIUS + " tiles");
     }
 
-    /** 干扰器缓存（每队） */
-    private static final ObjectMap<Team, Seq<SignalJammerBuild>> jammerCache = new ObjectMap<>();
+    /** 干扰器缓存（全局：干扰信道是跨队共享频段——任何队伍的干扰器都压制范围内的同信道信号，不分敌我） */
+    private static final Seq<SignalJammerBuild> jammerList = new Seq<>();
     private static boolean dirty = true;
 
     public static void markDirty() {
@@ -55,24 +53,25 @@ public class SignalJammer extends Block {
     static void rebuildCache() {
         if (!dirty) return;
         dirty = false;
-        jammerCache.clear();
+        jammerList.clear();
         for (Building b : Groups.build) {
             if (b instanceof SignalJammerBuild jb) {
-                jammerCache.get(jb.team, Seq::new).add(jb);
+                jammerList.add(jb);
             }
         }
     }
 
-    /** 某队伍的干扰器列表（走缓存） */
-    public static Seq<SignalJammerBuild> allJammers(Team team) {
+    /** 全部干扰器（走缓存，跨队伍） */
+    public static Seq<SignalJammerBuild> allJammers() {
         rebuildCache();
-        return jammerCache.get(team, new Seq<>());
+        return jammerList;
     }
 
-    /** 位置 (wx,wy) 处的同信道（或全信道）干扰强度（0~15，与信号强度同模型衰减；关闭的干扰器不干扰） */
-    public static float strengthAt(Team team, int channel, float wx, float wy) {
+    /** 位置 (wx,wy) 处的同信道（或全信道）干扰强度（0~15，与信号强度同模型衰减；关闭的干扰器不干扰）。
+     *  不分队伍：敌方干扰器同样压制我方该信道信号（H 覆盖中敌方干扰区不再显示我方信号）。 */
+    public static float strengthAt(int channel, float wx, float wy) {
         float best = 0f;
-        for (SignalJammerBuild jb : allJammers(team)) {
+        for (SignalJammerBuild jb : allJammers()) {
             if (!jb.enabled) continue; // 关闭（enabled=false）不发射干扰
             if (jb.jamChannel != ALL && jb.jamChannel != channel) continue;
             float s = SignalSource.strengthAt(jb.x, jb.y, wx, wy);

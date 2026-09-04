@@ -35,24 +35,44 @@ public class SignalChannel {
         return 0f;
     }
 
-    /** 卫星归属信号所在信道（按归属信号编码找信号源；无归属或源不存在返回 -1） */
-    public static int satelliteChannel(Team team) {
-        String sig = SatelliteManager.satelliteSignal(team);
-        if (sig == null) return -1;
-        for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(team)) {
-            if (sb.signal != null && sig.equals(sb.signal.name)) return sb.channel;
+    /**
+     * (wx,wy) 处是否处于指定信号 name 的"信号范围"内。
+     * 同一编码视为同一信号：在轨卫星的星下点覆盖圆（未被同信道干扰完全压制）、
+     * 信号源自身覆盖、同编码激活中继器的级联延伸，三者广播的有效范围取并集。
+     * 供卫星控制台 ↔ 卫星发射中枢绑定判定（控制台与中枢必须同处该信号范围内）。
+     */
+    public static boolean inSignalRange(Team team, String name, float wx, float wy) {
+        if (name == null || name.isEmpty()) return false;
+        // 在轨卫星：编码匹配的卫星，其星下点覆盖圆含该点且有效强度 > 0（同信道干扰可打断卫星绑定）
+        for (SatelliteManager.SatelliteRecord r : SatelliteManager.satellites(team)) {
+            if (r.code != null && name.equals(r.code) && SatelliteManager.satelliteEffAt(r, wx, wy) > 0f) {
+                return true;
+            }
         }
-        return -1;
+        return inGroundSignalRange(team, name, wx, wy);
     }
 
-    /** 计算结果：有效强度 + 最强同信道源（用于显示颜色） */
-    public static class Result {
-        public float strength;
-        public Building bestSource;
+    /**
+     * 仅地面覆盖（信号源 + 激活中继器），卫星覆盖不参与。
+     * 供卫星发射的 1:1 配对计数（hubsInSignal/consolesInSignal）使用：卫星覆盖只解锁
+     * "远方指派"该编码，配对仍约束地面基建布局——否则全图覆盖会把所有中枢算进同一
+     * "范围"，多中枢队伍永远 MULTI_HUB，发射能力被自己的卫星锁死。
+     */
+    public static boolean inGroundSignalRange(Team team, String name, float wx, float wy) {
+        if (name == null || name.isEmpty()) return false;
+        for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(team)) {
+            if (sb.signal != null && name.equals(sb.signal.name)
+                    && SignalSource.strengthAt(sb.x, sb.y, wx, wy) > 0f) {
+                return true;
+            }
+        }
+        for (SignalRelay.SignalRelayBuild rb : SignalRelay.allRelays(team)) {
+            if (rb.active && name.equals(rb.selectedSource) && rb.strengthAt(wx, wy) > 0f) {
+                return true;
+            }
+        }
+        return false;
     }
-
-    /** 计算结果（静态复用，避免每格分配；调用方立即读取字段） */
-    private static final Result tmp = new Result();
 
     // —— 每信道批量计算（覆盖绘制用）：静态缓冲，一次遍历全部源按信道分摊 ——
     private static final float[] bestA = new float[SignalJammer.CHANNEL_MAX + 1];
@@ -115,8 +135,11 @@ public class SignalChannel {
                     ? "S" + rb.selectedSource : "R" + ((int) rb.x * 7 + (int) rb.y * 13);
             addSource(rb.signalChannel(), s, id, rb);
         }
-        // 干扰器：同信道 + 邻信道泄漏
-        for (SignalJammer.SignalJammerBuild jb : SignalJammer.allJammers(team)) {
+        // 干扰器（全局：敌方干扰器同样压制本信道；同信道 + 邻信道泄漏）
+        // enabled 守卫与 SignalJammer.strengthAt 口径一致:关闭(enabled=false)不发射干扰——
+        // 否则 H 覆盖中同一干扰器在信道层"仍在压制"、卫星层却已消失,自相矛盾
+        for (SignalJammer.SignalJammerBuild jb : SignalJammer.allJammers()) {
+            if (!jb.enabled) continue;
             float j = SignalSource.strengthAt(jb.x, jb.y, wx, wy);
             if (jb.jamChannel == SignalJammer.ALL) {
                 for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) jamA[ch] += j;
@@ -135,83 +158,5 @@ public class SignalChannel {
             srcOut[ch] = bestSrcA[ch];
         }
     }
-
-    /**
-     * 计算位置 (wx,wy) 在信道 ch 的有效信号强度（0~15）。
-     * 遍历本队信号源与激活中继器：
-     * - 同信道：最强为目标，其余之和为 CCI
-     * - 邻信道：强度 × ACIR 为泄漏干扰
-     * - 干扰器：同信道强度 + 邻信道泄漏，直接叠加
-     */
-    public static Result effective(Team team, int ch, float wx, float wy) {
-        float best = 0f;
-        Building bestSrc = null;
-        String bestId = null; // 最强信号的来源身份（同身份不互扰：信号源与绑定它的中继器视为同一信号）
-        float otherSum = 0f; // 同信道其他源（CCI，仅不同身份之间）
-        float aciSum = 0f;   // 邻信道泄漏
-        // 信号源
-        for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(team)) {
-            float s = sb.strengthAt(wx, wy); // 原始信号强度（含断电检查）
-            if (s <= 0f) continue;
-            int dch = Math.abs(sb.channel - ch);
-            if (dch == 0) {
-                String id = "S" + sb.signal.name; // 信号源身份 = 自身编码
-                if (id.equals(bestId)) {
-                    // 同一信号身份（如本源的级联中继器）：取最强，不互相干扰
-                    if (s > best) {
-                        best = s;
-                        bestSrc = sb;
-                    }
-                } else if (s > best) {
-                    otherSum += best;
-                    best = s;
-                    bestId = id;
-                    bestSrc = sb;
-                } else {
-                    otherSum += s;
-                }
-            } else {
-                aciSum += s * acir(dch);
-            }
-        }
-        // 激活中继器（级联源；发射信道与所选信号源一致）
-        for (SignalRelay.SignalRelayBuild rb : SignalRelay.allRelays(team)) {
-            if (!rb.active) continue;
-            float s = rb.strengthAt(wx, wy);
-            if (s <= 0f) continue;
-            int dch = Math.abs(rb.signalChannel() - ch);
-            if (dch == 0) {
-                // 中继器身份 = 所选信号源编码（绑定）；未绑定用自身坐标
-                String id = (rb.selectedSource != null && !rb.selectedSource.isEmpty()) ? "S" + rb.selectedSource : "R" + ((int) rb.x * 7 + (int) rb.y * 13);
-                if (id.equals(bestId)) {
-                    // 同身份（信号源或其级联中继器）：取最强，不互相干扰
-                    if (s > best) {
-                        best = s;
-                        bestSrc = rb;
-                    }
-                } else if (s > best) {
-                    otherSum += best;
-                    best = s;
-                    bestId = id;
-                    bestSrc = rb;
-                } else {
-                    otherSum += s;
-                }
-            } else {
-                aciSum += s * acir(dch);
-            }
-        }
-        // 干扰器：同信道 + 邻信道泄漏
-        float jamSum = SignalJammer.strengthAt(team, ch, wx, wy); // 同信道/全信道
-        for (SignalJammer.SignalJammerBuild jb : SignalJammer.allJammers(team)) {
-            if (jb.jamChannel == SignalJammer.ALL || jb.jamChannel == ch) continue; // 同信道已在 jamSum
-            float s = SignalSource.strengthAt(jb.x, jb.y, wx, wy);
-            jamSum += s * acirJam(jb.jamChannel - ch);
-        }
-        // 干扰总量 = 底噪 + CCI + ACI + 干扰器
-        float interference = NOISE_FLOOR + otherSum + aciSum + jamSum;
-        tmp.strength = Math.max(0f, best - interference);
-        tmp.bestSource = bestSrc;
-        return tmp;
-    }
 }
+

@@ -49,9 +49,15 @@ public class SignalSource extends Block {
         consumePower(150f / 60f);
         // 用于客户端同步信号名（服务器通过 tileConfig 下发）
         config(String.class, (SignalSourceBuild b, String value) -> {
-            if (value != null && !value.isEmpty()) {
-                b.signal = new Signal(value);
+            // tileConfig 双向通道同队客户端可发包:必须校验格式(4 位大写字母/数字),
+            // 否则超长/任意字符串会进入 SignalOverlay 颜色缓存与各处 UI
+            if (value == null || value.length() != NAME_LENGTH) return;
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                boolean ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+                if (!ok) return;
             }
+            b.signal = new Signal(value);
         });
         // 信道（1~5）
         config(Integer.class, (SignalSourceBuild b, Integer v) -> b.channel = Math.max(1, Math.min(SignalJammer.CHANNEL_MAX, v)));
@@ -94,10 +100,10 @@ public class SignalSource extends Block {
         }
     }
 
-    /** 收集某队伍的所有信号源（走缓存） */
+    /** 收集某队伍的所有信号源（走缓存；get 的 Supplier 形式避免缓存未命中之外也分配） */
     public static Seq<SignalSourceBuild> allSources(Team team) {
         rebuildCache();
-        return sourceCache.get(team, new Seq<>());
+        return sourceCache.get(team, Seq::new);
     }
 
     /** 生成一个未被使用的 4 字符信号名（大写字母 A-Z + 数字 0-9） */
@@ -110,6 +116,24 @@ public class SignalSource extends Block {
             }
             String candidate = sb.toString();
             if (!isNameUsed(candidate)) return candidate;
+        }
+        // 兜底:随机 200 次未命中(理论仅当 36^4≈168 万空间近乎耗尽)时,
+        // 一次性收集占用名后按字典序找第一个未用编码,避免固定返回 "ZZZZ" 造成重复编码。
+        // 空间真耗尽(不可达)时维持旧兜底
+        arc.struct.ObjectSet<String> used = new arc.struct.ObjectSet<>();
+        for (Building b : Groups.build) {
+            if (b instanceof SignalSourceBuild sb && sb.signal != null) {
+                used.add(sb.signal.name);
+            }
+        }
+        int base = chars.length();
+        for (int n = 0; n < base * base * base * base; n++) {
+            String c = new String(new char[]{
+                    chars.charAt(n / (base * base * base) % base),
+                    chars.charAt(n / (base * base) % base),
+                    chars.charAt(n / base % base),
+                    chars.charAt(n % base)});
+            if (!used.contains(c)) return c;
         }
         return "ZZZZ";
     }
@@ -145,11 +169,11 @@ public class SignalSource extends Block {
             if (!added) {
                 add();
             }
-            // 服务器端生成唯一信号；客户端等待 tileConfig 同步
+            // 服务器端生成唯一信号；客户端等待 tileConfig 同步（按队定向,不向敌队广播）
             if (Vars.net.client()) return;
             signal = new Signal(generateUniqueName());
             if (Vars.net.server()) {
-                Call.tileConfig(null, this, signal.name);
+                silicon.util.NetSync.sendTeamConfig(this, signal.name);
             }
         }
 
@@ -157,9 +181,11 @@ public class SignalSource extends Block {
         public void onProximityAdded() {
             super.onProximityAdded();
             markDirty();
-            // 加载存档后向客户端重新同步（自定义字段不随实体系统同步）
+            // 尽力向客户端重发信号名。注意:读档时 onProximityAdded 先于 read() 执行,
+            // 此时 signal 还是 null,此处的重发实际不生效——真正的客机同步靠 MP 世界
+            // 快照(自定义 write() 数据随 writeMap 下发),此调用仅覆盖运行期信号重建的边缘情形
             if (signal != null && Vars.net.server()) {
-                Call.tileConfig(null, this, signal.name);
+                silicon.util.NetSync.sendTeamConfig(this, signal.name);
             }
         }
 

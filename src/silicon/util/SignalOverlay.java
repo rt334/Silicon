@@ -163,11 +163,11 @@ public class SignalOverlay {
         return signalColor("R" + ((int) rb.x * 7 + (int) rb.y * 13), groundHue(rb.x, rb.y));
     }
 
-    /** 卫星全图信号颜色：有归属 → 卫星所属信号的专属色（与所选信号源同色，编码相同命中同一缓存）；无归属 → 浅蓝→深蓝强度渐变 */
-    static Color satelliteColor(Team team, float t, Color out) {
-        String sig = SatelliteManager.satelliteSignal(team);
-        if (sig != null) {
-            out.set(signalColor(sig, -1f));
+    /** 卫星覆盖颜色：按编码专属色（与所选信号源同色，编码相同命中同一缓存）；
+     *  无编码（未绑定兜底记录）→ 浅蓝→深蓝强度渐变 */
+    static Color satelliteColor(String code, float t, Color out) {
+        if (code != null) {
+            out.set(signalColor(code, -1f));
         } else {
             out.set(LIGHT_BLUE).lerp(DEEP_BLUE, t);
         }
@@ -220,6 +220,9 @@ public class SignalOverlay {
         toggleVisible = false;
         prevDown = false;
         displayAlpha = 0f;
+        // 显示模式一并复位,否则跨图首帧 rangeMode 与残留的 lastRangeMode 不一致
+        // 会触发一次无意义的淡入重启
+        lastRangeMode = false;
     }
 
     static void update() {
@@ -270,51 +273,27 @@ public class SignalOverlay {
             lastRangeMode = rangeMode;
             displayAlpha = 0f;
         }
-        // 卫星全图信号强度（信号卫星每颗 +1，上限 15）
-        int satStrength = SatelliteManager.signalStrength(team);
         if (rangeMode) {
-            // 范围模式：先画卫星全图基础层（按卫星所属信号着色），再逐格绘制各信道有效信号
-            if (satStrength > 0) {
-                drawSatelliteRange(team, satStrength, alpha);
-            }
-            drawRangeComposite(team, satStrength, alpha);
+            // 范围模式：逐格合成绘制（地面信号源与在轨卫星同一模型）——每格只画最强一路，
+            // 卫星信号与信号源共用同一透明度公式与强度标度，不再有独立的卫星覆盖盘二次叠画
+            drawRangeComposite(team, alpha);
         } else {
             // 数字模式：逐格取各信道最大有效信号（含底噪/CCI/ACI/干扰器），每格只绘制一次
-            drawNumbersOverlay(team, satStrength, alpha);
+            drawNumbersOverlay(team, alpha);
         }
         Draw.reset();
-    }
-
-    /** 卫星全图信号层（范围模式）：可见区域内每格按卫星信号强度填充色块；卫星信号受归属信道干扰器压制（被压制格不画）；
-     *  颜色取卫星所属信号编码的专属色（无归属时蓝色渐变） */
-    static void drawSatelliteRange(Team team, int satStrength, float alpha) {
-        Rect view = Core.camera.bounds(Tmp.r1);
-        int x0 = (int) (view.x / 8f) - 1, x1 = (int) ((view.x + view.width) / 8f) + 1;
-        int y0 = (int) (view.y / 8f) - 1, y1 = (int) ((view.y + view.height) / 8f) + 1;
-        float rangeAlpha = Core.settings.getInt("signal.rangeAlpha", 45) / 100f;
-        int sch = SignalChannel.satelliteChannel(team);
-        // 逐格：卫星有效 = 卫星强度 − 归属信道干扰强度（被完全压制不画）
-        for (int gx = x0; gx <= x1; gx++) {
-            for (int gy = y0; gy <= y1; gy++) {
-                float wx = gx * 8f, wy = gy * 8f;
-                float satJam = sch >= 0 ? SignalJammer.strengthAt(team, sch, wx, wy) : 0f;
-                float s = Math.max(0f, satStrength - satJam);
-                if (s <= 0f) continue;
-                float t = s / SignalSource.MAX_STRENGTH;
-                // 颜色：卫星所属信号的专属色（与信号源同色）；无归属时浅蓝→深蓝渐变
-                satelliteColor(team, t, Tmp.c1);
-                Draw.color(Tmp.c1, (0.45f + 0.35f * t) * rangeAlpha * alpha);
-                Fill.rect(wx, wy, 8f, 8f);
-            }
-        }
     }
 
     /** 每信道有效强度/最强源缓冲（静态复用） */
     private static final float[] effBuf = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final Building[] srcBuf = new Building[SignalJammer.CHANNEL_MAX + 1];
+    /** 最强来源/最强卫星编码出参复用（渲染线程内串行使用,两处 draw 循环共享一份） */
+    private static final Building[] bestSrcTmp = new Building[1];
+    private static final String[] bestCodeTmp = new String[1];
 
-    /** 每格最大有效信号（一次遍历所有信道，与卫星层取 max）；卫星信号也受归属信道干扰；返回有效强度与最强来源（null=仅卫星） */
-    static float bestSignal(Team team, int satStrength, float wx, float wy, Building[] bestSrcOut) {
+    /** 每格最大有效信号（一次遍历所有信道，与卫星层取 max）；返回有效强度、最强来源与最强卫星编码。
+     *  卫星层模型与绑定/中继一致：覆盖该格的卫星各自按固化信道扣干扰后对数叠加（stackEff）、再扣底噪 */
+    static float bestSignal(Team team, float wx, float wy, Building[] bestSrcOut, String[] bestCodeOut) {
         // 批量计算所有信道（一次遍历全部源，按信道分摊——比逐信道调用快约 5 倍）
         SignalChannel.effectiveAll(team, wx, wy, effBuf, srcBuf);
         float bestStr = 0f;
@@ -325,22 +304,32 @@ public class SignalOverlay {
                 bestSrc = srcBuf[ch];
             }
         }
-        // 卫星全图信号：受归属信道干扰器压制
-        if (satStrength > 0f) {
-            int sch = SignalChannel.satelliteChannel(team);
-            float satJam = sch >= 0 ? SignalJammer.strengthAt(team, sch, wx, wy) : 0f;
-            float satEff = Math.max(0f, satStrength - satJam);
-            if (satEff > bestStr) {
-                bestStr = satEff;
-                bestSrc = null; // 卫星层
+        // 卫星层：覆盖该格的在轨卫星按各自固化信道扣干扰、对数叠加扣底噪；记录最强贡献者的编码用于着色
+        float satSum = 0f, satBest = 0f;
+        String satTop = null;
+        for (SatelliteManager.SatelliteRecord r : SatelliteManager.satellites(team)) {
+            float e = SatelliteManager.satelliteEffAt(r, wx, wy);
+            if (e <= 0f) continue;
+            satSum += e;
+            if (e > satBest) {
+                satBest = e;
+                satTop = r.code;
             }
+        }
+        float satStr = Math.max(0f, SatelliteManager.stackEff(satSum, satBest) - SignalChannel.NOISE_FLOOR);
+        if (satStr > bestStr) {
+            bestStr = satStr;
+            bestSrc = null; // 卫星层
+            bestCodeOut[0] = satTop; // 最强贡献卫星的编码（未绑定记录为 null → 蓝渐变）
+        } else {
+            bestCodeOut[0] = null; // 地面层获胜（或全零）：编码出参清空
         }
         bestSrcOut[0] = bestSrc;
         return bestStr;
     }
 
     /** 数字模式：可见区域内逐格取各信道最大有效信号，每格只绘制一次（字号覆盖一格 8px）；颜色取最强来源的专属色 */
-    static void drawNumbersOverlay(Team team, int satStrength, float alpha) {
+    static void drawNumbersOverlay(Team team, float alpha) {
         Rect view = Core.camera.bounds(Tmp.r1);
         int x0 = (int) (view.x / 8f) - 1, x1 = (int) ((view.x + view.width) / 8f) + 1;
         int y0 = (int) (view.y / 8f) - 1, y1 = (int) ((view.y + view.height) / 8f) + 1;
@@ -353,22 +342,23 @@ public class SignalOverlay {
         float screenH = Core.graphics.getBackBufferHeight();
         float scale = Mathf.clamp(0.2f * Core.graphics.getHeight() / (screenH <= 0f ? 1440f : screenH), 0.1f, 0.5f);
         Fonts.def.getData().setScale(scale);
-        Building[] bestSrc = new Building[1];
+        Building[] bestSrc = bestSrcTmp;
+        String[] bestCode = bestCodeTmp;
         try {
             // 单字符居中偏移：相对原 0.2 字号的 1/1.6，按当前字号比例缩放
             float k = scale / 0.2f;
             for (int gx = x0; gx <= x1; gx++) {
                 for (int gy = y0; gy <= y1; gy++) {
                     float wx = gx * 8f, wy = gy * 8f; // 格子中心（像素）
-                    float s = bestSignal(team, satStrength, wx, wy, bestSrc);
+                    float s = bestSignal(team, wx, wy, bestSrc, bestCode);
                     if (s <= 0f) continue;
                     int val = Mathf.round(s);
                     float t = s / SignalSource.MAX_STRENGTH;
-                    // 颜色：最强来源的专属色（信号源/中继器不同色）；仅卫星信号时为卫星所属信号色（无归属浅蓝→深蓝渐变）
+                    // 颜色：最强来源的专属色（信号源/中继器不同色）；仅卫星信号时为最强贡献卫星的编码色（未绑定浅蓝→深蓝渐变）
                     if (bestSrc[0] != null) {
                         Tmp.c1.set(buildingColor(bestSrc[0]));
                     } else {
-                        satelliteColor(team, t, Tmp.c1);
+                        satelliteColor(bestCode[0], t, Tmp.c1);
                     }
                     Tmp.c1.a((0.6f + 0.4f * t) * digitAlpha * alpha);
                     // 复用预计算字符串避免分配；居中偏移随字号缩放
@@ -383,8 +373,11 @@ public class SignalOverlay {
         }
     }
 
-    /** 范围模式（逐格合成）：每格取各信道最大有效信号，用最强来源的专属颜色绘制（重叠/干扰区显示最强或空白） */
-    static void drawRangeComposite(Team team, int satStrength, float alpha) {
+    /** 范围模式（逐格合成）：每格取各信道最大有效信号，与卫星层（对数叠加扣底噪）取 max，用最强来源的
+     *  专属颜色绘制（重叠/干扰区显示最强或空白）。卫星信号与地面信号源共用同一透明度公式
+     *  (0.45+0.35t)·rangeAlpha·alpha 与同一强度标度（t = 强度/MAX_STRENGTH），每格只绘制一次——
+     *  卫星覆盖透明度与信号源完全一致 */
+    static void drawRangeComposite(Team team, float alpha) {
         Rect view = Core.camera.bounds(Tmp.r1);
         float rpx = SignalSource.RADIUS * 8f;
         // 格子范围：视口外扩一个覆盖半径（源在视口外但覆盖进入视口）
@@ -392,18 +385,19 @@ public class SignalOverlay {
         int y0 = (int) ((view.y - rpx) / 8f) - 1, y1 = (int) ((view.y + view.height + rpx) / 8f) + 1;
         // 范围模式透明度（0~100，设置项）
         float rangeAlpha = Core.settings.getInt("signal.rangeAlpha", 45) / 100f;
-        Building[] bestSrc = new Building[1];
+        Building[] bestSrc = bestSrcTmp;
+        String[] bestCode = bestCodeTmp;
         for (int gx = x0; gx <= x1; gx++) {
             for (int gy = y0; gy <= y1; gy++) {
                 float wx = gx * 8f, wy = gy * 8f; // 格子中心（像素）
-                float s = bestSignal(team, satStrength, wx, wy, bestSrc);
+                float s = bestSignal(team, wx, wy, bestSrc, bestCode);
                 if (s <= 0f) continue;
                 float t = s / SignalSource.MAX_STRENGTH;
-                // 最强来源的专属颜色（仅卫星时为卫星所属信号色，无归属浅蓝），不透明度随强度
+                // 最强来源的专属颜色（仅卫星时为最强贡献卫星的编码色，未绑定浅蓝），不透明度随强度
                 if (bestSrc[0] != null) {
                     Draw.color(buildingColor(bestSrc[0]), (0.45f + 0.35f * t) * rangeAlpha * alpha);
                 } else {
-                    satelliteColor(team, t, Tmp.c2);
+                    satelliteColor(bestCode[0], t, Tmp.c2);
                     Draw.color(Tmp.c2, (0.45f + 0.35f * t) * rangeAlpha * alpha);
                 }
                 Fill.rect(wx, wy, 8f, 8f);

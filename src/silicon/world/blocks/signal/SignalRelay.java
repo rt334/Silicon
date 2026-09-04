@@ -10,8 +10,10 @@ import arc.struct.ObjectMap;
 import arc.struct.Seq;
 import arc.util.io.Reads;
 import arc.util.io.Writes;
+import mindustry.Vars;
 import mindustry.game.Team;
 import mindustry.gen.Building;
+import mindustry.gen.Call;
 import mindustry.gen.Groups;
 import mindustry.graphics.Drawf;
 import mindustry.ui.Styles;
@@ -42,6 +44,11 @@ public class SignalRelay extends Block {
         configurable = true;
         config(String.class, (SignalRelayBuild b, String value) ->
                 b.selectedSource = (value == null || value.isEmpty()) ? null : value);
+        // active 状态同步（服务器在激活状态变化时下发；客机应用后 H 覆盖可显示级联段）。
+        // 客机伪造的 Boolean 会在下一次 updateActive（20 tick）被服务器重算覆盖，天然自愈。
+        config(Boolean.class, (SignalRelayBuild b, Boolean v) -> {
+            if (v != null) b.active = v;
+        });
     }
 
     /**
@@ -127,15 +134,14 @@ public class SignalRelay extends Block {
             return null;
         }
 
-        /** 发射信道：绑定信号源后与其保持一致；绑定卫星归属信号时用其信道；未绑定用自身 channel */
+        /** 发射信道：绑定信号源后与其保持一致；绑定卫星编码时用在轨卫星发射时固化的信道
+         *  （源被拆不影响卫星信道），未绑定用自身 channel */
         public int signalChannel() {
             SignalSource.SignalSourceBuild src = findSource();
             if (src != null) return src.channel;
-            // 卫星中继：绑定编号 == 卫星归属编号 → 卫星归属信道
-            String sat = silicon.util.SatelliteManager.satelliteSignal(team);
-            if (selectedSource != null && selectedSource.equals(sat)) {
-                int sch = SignalChannel.satelliteChannel(team);
-                if (sch >= 0) return sch;
+            // 卫星中继：绑定编码有在轨卫星 → 用其发射时固化的信道（ SatelliteManager 名册）
+            for (silicon.util.SatelliteManager.SatelliteRecord r : silicon.util.SatelliteManager.satellites(team)) {
+                if (r.code != null && r.code.equals(selectedSource) && r.channel >= 1) return r.channel;
             }
             return channel;
         }
@@ -162,20 +168,20 @@ public class SignalRelay extends Block {
                         }
                     }
                 }
-                // 卫星中继：绑定编号 == 卫星归属编号，且卫星信号有效（归属信道未被完全压制）
+                // 卫星中继：所选编码存在在轨卫星，且卫星信号在中继器位置有效
+                // （星下点覆盖圆内、未被其固化信道干扰压制；总和扣底噪后需 >0.5——
+                // 首颗卫星有效强度 1.0 达标，覆盖圆内中继器即可被激活转发，叠星提升抗干扰裕度）
                 if (!newActive) {
-                    String sat = silicon.util.SatelliteManager.satelliteSignal(team);
-                    if (selectedSource != null && selectedSource.equals(sat)) {
-                        int sch = SignalChannel.satelliteChannel(team);
-                        float satJam = sch >= 0 ? SignalJammer.strengthAt(team, sch, x, y) : 0f;
-                        float satEff = Math.max(0f, silicon.util.SatelliteManager.signalStrength(team) - satJam);
-                        if (satEff > 0.5f) newActive = true;
-                    }
+                    float satEff = silicon.util.SatelliteManager.satelliteStrengthAt(team, selectedSource, x, y);
+                    if (satEff > 0.5f) newActive = true;
                 }
             }
             if (newActive != active) {
                 active = newActive;
                 SignalRelay.markDirty();
+                // 激活状态变化 → 服务器下发到客机（active 是 mod 自定义字段，不随实体网络同步；
+                // 按队定向,敌队客户端不再收到我方中继器激活时机）
+                if (Vars.net.server()) silicon.util.NetSync.sendTeamConfig(this, active);
             }
         }
 

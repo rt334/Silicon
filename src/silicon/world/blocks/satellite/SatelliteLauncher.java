@@ -22,6 +22,7 @@ import mindustry.content.Items;
 import mindustry.content.Liquids;
 import mindustry.ctype.UnlockableContent;
 import mindustry.gen.Building;
+import mindustry.gen.Call;
 import mindustry.gen.Tex;
 import mindustry.graphics.Pal;
 import mindustry.type.Item;
@@ -29,10 +30,10 @@ import mindustry.type.ItemStack;
 import mindustry.type.Liquid;
 import mindustry.ui.Bar;
 import mindustry.ui.Styles;
+import mindustry.Vars;
 import mindustry.world.Block;
 import mindustry.world.meta.Stat;
 import mindustry.world.meta.StatUnit;
-import silicon.content.Statuses;
 import silicon.util.SatelliteManager;
 
 import static mindustry.type.ItemStack.with;
@@ -55,8 +56,8 @@ public class SatelliteLauncher extends Block {
     public static final float LAUNCH_POWER = 10000f;
     /** 缓冲充电速率（/秒）：电网供电时向缓冲充电 */
     public static final float CHARGE_RATE = 2000f / 60f;
-    /** 发射所需石油燃料 */
-    public static final int FUEL_OIL = 1000;
+    /** 石油储油上限（按最高轨道需求 SSO 8000 设计；发射实际消耗按控制台所选轨道 1000~8000） */
+    public static final int OIL_CAPACITY = SatelliteConsole.ORBIT_MAX_FUEL;
     /** 生产所需冷冻液 */
     public static final int COST_CRYOFLUID = 1000;
     /** 生产所需物品材料 */
@@ -69,7 +70,7 @@ public class SatelliteLauncher extends Block {
 
     /** 卫星种类：信号卫星 */
     public static final int TYPE_SIGNAL = 0;
-    /** 卫星种类：测试卫星（材料 1 硅，效果同信号卫星：全图信号 +1；低成本快速生产，仅用于测试） */
+    /** 卫星种类：测试卫星（材料 1 硅，效果同信号卫星：星下点覆盖；低成本快速生产，仅用于测试；沙盒模式专属） */
     public static final int TYPE_TEST = 1;
 
     /** 测试卫星的生产材料（1 硅，无冷冻液） */
@@ -130,8 +131,19 @@ public class SatelliteLauncher extends Block {
         acceptsItems = true;
         itemCapacity = 5000 + 5000 + 1250 + 1250;
         hasLiquids = true;
-        liquidCapacity = FUEL_OIL + COST_CRYOFLUID;
+        liquidCapacity = OIL_CAPACITY + COST_CRYOFLUID;
+        // 卫星种类走 configure 同步（服务器权威下发，各端选中类型一致）
+        config(Integer.class, (SatelliteLauncherBuild b, Integer v) ->
+                b.selectedType = Math.max(TYPE_SIGNAL, Math.min(TYPE_TEST, v == null ? TYPE_SIGNAL : v)));
+        // 运行时快照（battery|progress|produced）：服务器周期下发，客机应用镜像，使面板/提示与主机一致
+        config(String.class, (SatelliteLauncherBuild b, String s) -> b.applySnapshot(s));
     }
+
+    /** 快照字段分隔符 */
+    private static final char SNAP_SEP = '|';
+
+    /** 生产进度/缓冲/完成状态同步周期（tick） */
+    private static final int SNAPSHOT_INTERVAL = 15;
 
     @Override
     public void setStats() {
@@ -160,6 +172,30 @@ public class SatelliteLauncher extends Block {
         private final Table materialTable = new Table();
         /** 上次显示的种类（用于检测切换并重建材料行） */
         private int lastShownType = -1;
+        /** 运行状态快照同步计时（服务器每 SNAPSHOT_INTERVAL tick 向客机下发一次） */
+        private int snapshotTimer = 0;
+
+        /** 服务器构造本中枢运行快照（整数化减小包体） */
+        String snapshot() {
+            return (int) battery + "" + SNAP_SEP + (int) progress + SNAP_SEP + (produced ? "1" : "0");
+        }
+
+        /** 客机应用主机下发的运行快照（battery|progress|produced）；解析失败忽略（防伪造串） */
+        void applySnapshot(String s) {
+            // 主机权威守卫:该处理器挂在 tileConfig 双向通道上,任何同队客户端都能向服务器
+            // 发包走这里——若不拦截,发一条 "10000|0|1" 即可在主机上凭空造出跳过全部
+            // 材料与充电的"已就绪"卫星。快照只允许 服务器下发→客机应用 单向流动:
+            // 服务器侧(含主机自身本地回环)一律忽略,权威值本来就在服务器字段里。
+            if (Vars.net.server()) return;
+            try {
+                String[] p = s.split("\\" + SNAP_SEP, -1);
+                if (p.length != 3) return;
+                battery = Math.max(0f, Math.min(LAUNCH_POWER, Integer.parseInt(p[0])));
+                progress = Math.max(0f, Math.min(produceTime(selectedType), Integer.parseInt(p[1])));
+                produced = p[2].equals("1");
+            } catch (NumberFormatException ignored) {
+            }
+        }
 
         @Override
         public void updateTile() {
@@ -167,6 +203,14 @@ public class SatelliteLauncher extends Block {
             if (selectedType != lastShownType) {
                 lastShownType = selectedType;
                 rebuildMaterialTable();
+            }
+            // 运行快照周期下发（仅服务器，按队定向——不再 tileConfig(null) 全员广播，
+            // 敌队客户端不再收到我方中枢电量/进度明文）。客机 updateTile 照常运行(v159 Logic.java
+            // 的 Groups.build.update 不排除 net.client()),客机进入本分支但 net.server() 为假不会发送;
+            // 即便伪造 tileConfig 顶到服务器,applySnapshot 的服务端守卫也会拦截
+            if (Vars.net.server() && ++snapshotTimer >= SNAPSHOT_INTERVAL) {
+                snapshotTimer = 0;
+                silicon.util.NetSync.sendTeamConfig(this, snapshot());
             }
             // 关闭（enabled=false，逻辑门/开关控制）：不充电、不生产（进度与已生产状态保留）
             if (!enabled) return;
@@ -181,6 +225,8 @@ public class SatelliteLauncher extends Block {
             }
             // 断电不生产（进度保留）
             if (power == null || power.status <= 0.001f) return;
+            // 测试卫星沙盒专属：非沙盒模式不生产（配置被存档/原理图带入时兜底；不消耗任何材料）
+            if (selectedType == TYPE_TEST && !SatelliteManager.testSatelliteAvailable()) return;
             // 生产开始：检查并一次性扣除材料（进度 > 0 表示已扣）
             if (progress <= 0f) {
                 if (!hasProductionMaterials()) return;
@@ -241,16 +287,16 @@ public class SatelliteLauncher extends Block {
             return liquid == Liquids.oil || liquid == Liquids.cryofluid;
         }
 
-        /** 发射前资源检查：返回 LAUNCH_OK 或缺失原因 */
-        public int checkLaunchResources() {
-            if (liquids.get(Liquids.oil) < FUEL_OIL) return SatelliteManager.LAUNCH_NO_FUEL;
+        /** 发射前资源检查（按所选轨道所需石油）：返回 LAUNCH_OK 或缺失原因 */
+        public int checkLaunchResources(int fuelOil) {
+            if (liquids.get(Liquids.oil) < fuelOil) return SatelliteManager.LAUNCH_NO_FUEL;
             if (battery < LAUNCH_POWER) return SatelliteManager.LAUNCH_NO_POWER;
             return SatelliteManager.LAUNCH_OK;
         }
 
-        /** 发射：扣除燃料与缓冲电力，重置本中枢使其可再生产（由 SatelliteManager 调用） */
-        public void consumeLaunchResources() {
-            liquids.remove(Liquids.oil, FUEL_OIL);
+        /** 发射：扣除该轨道所需石油与缓冲电力，重置本中枢使其可再生产（由 SatelliteManager 调用） */
+        public void consumeLaunchResources(int fuelOil) {
+            liquids.remove(Liquids.oil, fuelOil);
             battery = Math.max(0f, battery - LAUNCH_POWER);
             // 同步从电网电池扣除（模拟真实消耗，电网无电池则仅清空本缓冲）
             if (power != null) power.graph.useBatteries(LAUNCH_POWER);
@@ -306,8 +352,14 @@ public class SatelliteLauncher extends Block {
                 }
             }
             if (produced) {
+                // 「可发射」提示：程序化标记（脉冲圆点+上指三角，accent 色），不依赖任何贴图/状态图标
                 Draw.z(35f);
-                Draw.rect(Statuses.satelliteBuff.uiIcon, x, y + 16f + Mathf.sin(Time.time / 24f, 3f), 16f, 16f);
+                float bob = y + 16f + Mathf.sin(Time.time / 24f, 3f);
+                Draw.color(Pal.accent, 0.9f);
+                Fill.circle(x, bob, 3.5f);
+                Fill.poly(x, bob + 9f, 3, 4f, 90f);
+                Draw.color(Pal.accent, 0.3f);
+                Fill.circle(x, bob, 7f);
                 Draw.reset();
             }
         }
@@ -332,8 +384,8 @@ public class SatelliteLauncher extends Block {
                 Draw.color(Pal.accent);
                 Tex.barTop.draw(x - barW / 2f, barY - barH / 2f, barW * t, barH);
             }
-            // 石油不足：方块左下角显示石油小图标（原版缺液体风格）
-            if (liquids.get(Liquids.oil) < FUEL_OIL) {
+            // 石油不足（低于最低轨道 LEO 需求）：方块左下角显示石油小图标（原版缺液体风格）
+            if (liquids.get(Liquids.oil) < SatelliteConsole.ORBIT_FUEL[SatelliteConsole.ORBIT_LEO]) {
                 Draw.rect(Liquids.oil.uiIcon, x - size * 4f + 6f, y - size * 4f + 6f, 8f, 8f);
             }
             Draw.reset();
@@ -349,21 +401,22 @@ public class SatelliteLauncher extends Block {
             ButtonGroup<TextButton> group = new ButtonGroup<>();
             TextButton signalBtn = new TextButton(Core.bundle.get("block.silicon-satellite-launcher.type.signal"), Styles.flatTogglet);
             signalBtn.setChecked(selectedType == TYPE_SIGNAL);
-            signalBtn.clicked(() -> selectedType = TYPE_SIGNAL);
+            // configure 同步（服务器权威下发，各端选中类型一致）；乐观先设本地保证即时反馈
+            signalBtn.clicked(() -> { selectedType = TYPE_SIGNAL; configure(TYPE_SIGNAL); });
             group.add(signalBtn);
             table.add(signalBtn).size(200f, 44f).pad(3f);
             table.row();
-            TextButton testBtn = new TextButton(Core.bundle.get("block.silicon-satellite-launcher.type.test"), Styles.flatTogglet);
-            testBtn.setChecked(selectedType == TYPE_TEST);
-            testBtn.clicked(() -> selectedType = TYPE_TEST);
-            group.add(testBtn);
-            table.add(testBtn).size(200f, 44f).pad(3f);
-        }
-
-        /** 当前种类显示名（bundle 键） */
-        String typeNameKey() {
-            return selectedType == TYPE_TEST
-                    ? "block.silicon-satellite-launcher.type.test" : "block.silicon-satellite-launcher.type.signal";
+            // 测试卫星沙盒专属：非沙盒模式不出现该选项（配置被带入时由生产/发射权威端兜底拦截）
+            if (SatelliteManager.testSatelliteAvailable()) {
+                TextButton testBtn = new TextButton(Core.bundle.get("block.silicon-satellite-launcher.type.test"), Styles.flatTogglet);
+                testBtn.setChecked(selectedType == TYPE_TEST);
+                testBtn.clicked(() -> { selectedType = TYPE_TEST; configure(TYPE_TEST); });
+                group.add(testBtn);
+                table.add(testBtn).size(200f, 44f).pad(3f);
+            } else if (selectedType == TYPE_TEST) {
+                // 非沙盒模式下面板只显示信号卫星选项，选中态归位
+                signalBtn.setChecked(true);
+            }
         }
 
         /** 选中面板（按原版空军工厂样式）：需求材料+石油（图标+数量角标下边缘居中）、进度条、石油条、电力条（长度与原版 bar 一致） */
@@ -386,11 +439,11 @@ public class SatelliteLauncher extends Block {
                         () -> produced ? 1f : Math.min(1f, progress / total)))
                         .height(18f).growX().padTop(8f);
                 info.row();
-                // 石油条（与其他 bar 长度统一，带说明文字：石油燃料 x/1000；高度与原版 bar 一致避免文字溢出重叠）
+                // 石油储备条（储量到最高轨道需求；实际发射消耗按控制台所选轨道）
                 info.add(new Bar(
-                        () -> Core.bundle.format("block.silicon-satellite-launcher.fuel", (int) liquids.get(Liquids.oil), FUEL_OIL),
+                        () -> Core.bundle.format("block.silicon-satellite-launcher.fuel", (int) liquids.get(Liquids.oil), OIL_CAPACITY),
                         () -> Pal.ammo,
-                        () -> Math.min(1f, liquids.get(Liquids.oil) / FUEL_OIL)))
+                        () -> Math.min(1f, liquids.get(Liquids.oil) / OIL_CAPACITY)))
                         .height(18f).growX().padTop(8f);
                 info.row();
                 // 电力条（单独显示：发射缓冲 Bar，与其他 bar 长度统一，带说明文字：发射缓冲 xx%）
@@ -430,17 +483,7 @@ public class SatelliteLauncher extends Block {
                     ).size(40f);
                 }).padRight(4f);
             }
-            // 石油（发射燃料）：同样式，需求数量 1000 角标左下角，不足红斜线
-            materialTable.table(r -> {
-                r.left();
-                r.stack(
-                        new Image(Liquids.oil.uiIcon),
-                        new InsufficientLine(() -> liquids.get(Liquids.oil) < FUEL_OIL),
-                        new Table(t -> t.add(new Label(formatCount(FUEL_OIL), Styles.outlineLabel) {{
-                            setFontScale(0.95f);
-                        }}).expand().bottom().left().padBottom(2f).padLeft(2f))
-                ).size(40f);
-            }).padRight(4f);
+            // 石油（发射燃料）不在此列出需求：消耗量随控制台所选轨道变化（LEO 1000 ~ SSO 8000），见下方石油储备条
         }
 
         @Override

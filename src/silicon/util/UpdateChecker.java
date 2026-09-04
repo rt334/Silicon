@@ -33,18 +33,18 @@ public class UpdateChecker {
     public static final String API_URL = "https://api.github.com/repos/" + REPO + "/releases";
     public static final String DOWNLOAD_PREFIX = "https://github.com/" + REPO + "/releases/download/";
 
-    /** 是否已检查（启动后只检查一次） */
-    public static boolean checked = false;
+    /** 是否已检查（启动后只检查一次）。HTTP 线程写/UI 线程读，需 volatile 保证可见性 */
+    public static volatile boolean checked = false;
     /** 是否存在更新 */
-    public static boolean hasUpdate = false;
+    public static volatile boolean hasUpdate = false;
     /** 最新版本号 tag（如 va0.10.0.0，下载 URL 用） */
-    public static String latestVersion = "";
+    public static volatile String latestVersion = "";
     /** 最新 jar 下载地址 */
-    public static String downloadUrl = "";
-    /** 下载状态 */
-    public static boolean downloading = false;
-    public static boolean downloadDone = false;
-    public static boolean downloadFailed = false;
+    public static volatile String downloadUrl = "";
+    /** 下载状态（均在 HTTP 线程写、UI 线程读） */
+    public static volatile boolean downloading = false;
+    public static volatile boolean downloadDone = false;
+    public static volatile boolean downloadFailed = false;
     /** 上次检查时间（毫秒）：限制手动检查频率，避免触发 GitHub API 限流 */
     private static long lastCheckTime = 0;
 
@@ -196,42 +196,66 @@ public class UpdateChecker {
             // 全部 CDN + 直连均失败
             downloading = false;
             downloadFailed = true;
-            onError.run();
+            Core.app.post(onError);
             return;
         }
         String url = index < CDN_PREFIXES.length ? CDN_PREFIXES[index] + downloadUrl : downloadUrl;
-        Http.get(url, res -> {
+        // 下载大 jar 需要长超时(默认仅 8 秒);失败回调挂 .error,成功回调走 .submit
+        Http.get(url).timeout(60000).error(err -> {
+            // 网络失败：继续尝试下一个源（CDN 加速）
+            SiliconLog.info("Download failed, trying next source: " + url + " (" + err + ")");
+            downloadFrom(index + 1, onDone, onError);
+        }).submit(res -> {
             byte[] data = res.getResult();
+            // Arc Http.getResult() 在下载体中途 IOException(超时/断连)时会吞异常并返回空数组:
+            // HTTP 状态错误走 error 回调,但"截断的 200 响应"会以成功身份进来。
+            // 必须先完整校验内容,再动 mods 目录——旧实现先删旧 jar、0 字节也判"成功",
+            // 结果是留下一个 0 字节 Silicon.jar 还提示"更新已安装"。
+            boolean valid = data != null && data.length > 4
+                    // jar 即 zip:魔数 "PK"
+                    && data[0] == 'P' && data[1] == 'K'
+                    // 与 Content-Length 比对(未知时为负数,跳过该项)
+                    && (res.getContentLength() <= 0 || res.getContentLength() == data.length);
+            if (!valid) {
+                SiliconLog.info("Update download invalid (truncated/empty response): " + url);
+                downloading = false;
+                downloadFailed = true;
+                Core.app.post(onError);
+                return;
+            }
             boolean ok = false;
             try {
-                // 只删除本模组的 jar：精确名 Silicon.jar，或 release 资产命名（Silicon-<版本>.jar），
+                var dir = Vars.modDirectory;
+                // ① 先落临时文件并校验字节数—— mods 目录此刻仍未被破坏
+                var tmp = dir.child("Silicon.jar.part");
+                tmp.writeBytes(data, false);
+                if (tmp.length() != data.length) throw new Exception("temp size mismatch");
+                // ② 只删除本模组的 jar：精确名 Silicon.jar，或 release 资产命名（Silicon-<版本>.jar），
                 // 避免误删其他文件名含 silicon 的模组
-                for (var f : Vars.modDirectory.list()) {
+                for (var f : dir.list()) {
                     String n = f.name().toLowerCase();
                     if (f.extEquals("jar") && (n.equals("silicon.jar") || n.startsWith("silicon-"))) {
                         f.delete();
                     }
                 }
-                // 写入新 jar，并校验落盘字节数
-                var target = Vars.modDirectory.child("Silicon.jar");
-                target.writeBytes(data);
+                // ③ 同目录 rename 落位（近乎原子;失败则回写直写并再校验）
+                var target = dir.child("Silicon.jar");
+                tmp.moveTo(target);
                 ok = target.length() == data.length;
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                SiliconLog.info("Update install failed: " + e);
             }
             if (ok) {
                 downloading = false;
                 downloadDone = true;
-                onDone.run();
+                // 回调最终会碰 scene2d(ui.showInfoToast),必须在渲染线程执行
+                Core.app.post(onDone);
             } else {
-                // 写入失败（磁盘问题）：重试其他源无意义，直接失败
+                // 落盘失败（磁盘问题）：重试其他源无意义，直接失败
                 downloading = false;
                 downloadFailed = true;
-                onError.run();
+                Core.app.post(onError);
             }
-        }, err -> {
-            // 网络失败：继续尝试下一个源（CDN 加速）
-            SiliconLog.info("Download failed, trying next source: " + url + " (" + err + ")");
-            downloadFrom(index + 1, onDone, onError);
         });
     }
 
