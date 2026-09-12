@@ -120,9 +120,13 @@ if (-not $SkipBuild) {
         Write-Host '[fork-publish] dry run: would run gradle jar'
     } else {
         Write-Host '[fork-publish] building jar ...'
-        .\gradlew.bat jar '-Dhttps.proxyHost=127.0.0.1' '-Dhttps.proxyPort=7897' 2>&1 |
-            Select-String -Pattern 'BUILD|error:|FAILURE' | Select-Object -First 5
-        if ($LASTEXITCODE -ne 0) { throw 'gradle build failed' }
+        # Do not pipe gradle into Select-Object -First N: truncating the pipeline kills
+        # the native process and turns a good build into a false failure.
+        $buildLog = Get-FullPath 'build/gradle-publish.log'
+        & .\gradlew.bat jar '-Dhttps.proxyHost=127.0.0.1' '-Dhttps.proxyPort=7897' *> $buildLog
+        $buildCode = $LASTEXITCODE
+        if (Test-Path $buildLog) { Get-Content $buildLog | Select-String -Pattern 'BUILD|error:|FAILURE' | Select-Object -Last 5 }
+        if ($buildCode -ne 0) { throw 'gradle build failed' }
         Get-Item (Get-FullPath 'build/libs/SiliconDesktop.jar') |
             ForEach-Object { Write-Host "[fork-publish] jar: $($_.Length) bytes  $($_.LastWriteTime)" }
     }

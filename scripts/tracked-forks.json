@@ -1,0 +1,50 @@
+{
+  "forks": [
+    {
+      "name": "upstream",
+      "repo": "SiliconMod/Silicon",
+      "branch": "test",
+      "remote": "origin",
+      "label": "上游主线"
+    },
+    {
+      "name": "arc",
+      "repo": "ARCloud217/Silicon-ARCforked",
+      "branch": "test",
+      "remote": "arc",
+      "label": "ARCloud217（贴图 / 保护器改写 / 炼油厂）"
+    },
+    {
+      "name": "xiaobei09",
+      "repo": "Xiaobei09/Silicon",
+      "branch": "test",
+      "remote": "xiaobei09",
+      "label": "Xiaobei09（主要维护者）"
+    },
+    {
+      "name": "by514",
+      "repo": "by514/Silicon",
+      "branch": "test",
+      "remote": "by514",
+      "label": "by514（维护者 / 合并人）"
+    },
+    {
+      "name": "sm09",
+      "repo": "SiliconMod/Silicon09",
+      "branch": "test",
+      "remote": "sm09",
+      "label": "Silicon09 仓库"
+    }
+  ],
+  "localBranchPrefix": "track/",
+  "jarDir": "build/tracked",
+  "strings": {
+    "syncHeader": "跟踪分支状态",
+    "notSynced": "未同步",
+    "downloaded": "已下载 release jar",
+    "built": "已构建 jar",
+    "installed": "已安装到游戏 mods",
+    "noRelease": "该仓库没有 release 资产，请用 -Action build",
+    "backup": "已备份原 Silicon.jar"
+  }
+}

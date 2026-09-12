@@ -59,7 +59,32 @@ powershell -ExecutionPolicy Bypass -File scripts\fork-publish.ps1 -Message "[a0.
 - **README**：自动维护**最新构建区块**（分支、提交、时间、下载链接），由脚本在 `<!-- FORK-BUILD:BEGIN -->` / `<!-- FORK-BUILD:END -->` 之间替换——**请勿手改该区块**。
 - **更新日志**：仍**按版本号**人工/按需增加条目（与版本递增绑定），自动化不会代写业务内容。
 
-## 四、提交信息与 PR 约定
+## 四、跟踪其他开发者的仓库（便于随时拿 jar 本地测试）
+
+清单在 `scripts/tracked-forks.json`，默认跟踪：`upstream`（上游主线）、`arc`（ARCloud217）、`xiaobei09`、`by514`、`sm09`（Silicon09）。要加人只需加一条记录（`name` / `repo` / `branch` / `remote` / `label`）。
+
+```powershell
+# 同步全部跟踪分支并打印状态表（tip / 日期 / 相对上游多出多少提交 / 已有 jar）
+powershell -ExecutionPolicy Bypass -File scripts\track-forks.ps1
+
+# 下载对方 release 里的 jar（最快）
+powershell -ExecutionPolicy Bypass -File scripts\track-forks.ps1 -Action jar -Name arc
+
+# 从对方源码构建 jar（临时 worktree，不碰当前工作树；对方未发 release 时用这个）
+powershell -ExecutionPolicy Bypass -File scripts\track-forks.ps1 -Action build -Name arc
+
+# 装进游戏测试（会先把现有 mods\Silicon.jar 备份到 build\tracked\）
+powershell -ExecutionPolicy Bypass -File scripts\track-forks.ps1 -Action install -Name arc
+
+# 看对方比上游多了哪些提交
+powershell -ExecutionPolicy Bypass -File scripts\track-forks.ps1 -Action diff -Name xiaobei09
+```
+
+- 跟踪分支只存在**本地**，名为 `track/<name>`；**不把别人的代码镜像进我们仓库**（上游仓库没有 license 声明）。
+- 下载/构建出的 jar 统一落在 `build/tracked/`，命名 `<name>-<tag|sha>.jar`，可反复取用。
+- 网络抖动时脚本会自动在**直连与本地代理**之间来回重试。
+
+## 五、提交信息与 PR 约定
 
 - 提交格式：`[版本] 类型: 描述`，例如 `[a0.13.0.0] fix: 频谱表头居中`；类型用 `feat` / `fix` / `chore` / `docs` / `ci` / `merge`。
 - 一个上游 PR 一个版本号：改完 → `version-bump.ps1` → 提交 → 推 `rt334` → 向上游开 PR。
