@@ -31,6 +31,7 @@ param(
     [switch]$SkipRelease,
     [switch]$SkipReadme,
     [switch]$SkipInstall,
+    [switch]$LocalReadme,
     [switch]$DryRun
 )
 
@@ -110,7 +111,11 @@ if (-not $SkipBuild) {
 }
 
 # 5) release + README
-if (-not $SkipRelease -or -not $SkipReadme) {
+# The README "latest build" block is owned by CI (.github/workflows/fork-publish.yml
+# runs on every push to fork/main). Doing it locally as well would create two
+# competing commits for the same block and a non-fast-forward on the next push,
+# so the local run only writes it when -LocalReadme is given explicitly.
+if (-not $SkipRelease -or (-not $SkipReadme -and $LocalReadme)) {
     $psArgs = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', (Join-Path $PSScriptRoot 'fork-release.ps1'),
@@ -120,7 +125,10 @@ if (-not $SkipRelease -or -not $SkipReadme) {
         '-PushRemote', $Remote
     )
     if ($SkipRelease) { $psArgs += '-SkipRelease' }
-    if ($SkipReadme) { $psArgs += '-SkipReadme' }
+    if ($SkipReadme -or -not $LocalReadme) {
+        $psArgs += '-SkipReadme'
+        if (-not $LocalReadme) { Write-Host '[fork-publish] README block left to CI (use -LocalReadme to write it locally)' }
+    }
     if ($DryRun) { $psArgs += '-DryRun' }
     & powershell.exe @psArgs
     if ($LASTEXITCODE -ne 0) { throw 'fork-release step failed' }
