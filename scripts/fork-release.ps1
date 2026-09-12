@@ -151,11 +151,10 @@ if (-not $SkipReadme) {
             git commit -F $msgFile | Out-Null
             Write-Host "[fork-release] README block committed ($sha)"
             if (-not $NoPush) {
-                if (Invoke-Push -Ref 'HEAD' -Remote $PushRemote -Token $token) {
-                    Write-Host '[fork-release] README commit pushed'
-                } else {
-                    Write-Host '[fork-release] WARNING: README commit not pushed (network)'
+                if (-not (Invoke-Push -Ref 'HEAD' -Remote $PushRemote -Token $token)) {
+                    throw 'README build block committed but not pushed (fix the push, then rerun; otherwise the next CI run fights over the same block)'
                 }
+                Write-Host '[fork-release] README commit pushed'
             }
         } else {
             Write-Host '[fork-release] README block unchanged, nothing to commit'

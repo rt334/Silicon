@@ -85,10 +85,28 @@ if ($SourceBranch -ne $IntegrationBranch) {
     } else {
         git checkout $IntegrationBranch 2>&1 | Select-Object -Last 1
         if ($LASTEXITCODE -ne 0) { throw "cannot checkout $IntegrationBranch" }
+
+        # CI adds a README-block commit to the integration branch after every push, so
+        # the local branch must be fast-forwarded onto the remote before merging again.
+        git fetch $Remote $IntegrationBranch 2>$null | Out-Null
+        $mergeBase = "$Remote/$IntegrationBranch"
+        if (git rev-parse --verify --quiet $mergeBase) {
+            git merge --ff-only $mergeBase 2>&1 | Select-Object -Last 1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[fork-publish] local $IntegrationBranch diverged from $mergeBase - merging remote in"
+                git merge --no-ff $mergeBase -m "merge: $mergeBase into $IntegrationBranch" 2>&1 | Select-Object -Last 2
+                if ($LASTEXITCODE -ne 0) {
+                    git merge --abort 2>$null
+                    git checkout $startBranch 2>$null | Out-Null
+                    throw "conflict while syncing $IntegrationBranch with $mergeBase - resolve manually"
+                }
+            }
+        }
+
         git merge --no-ff $SourceBranch -m "merge: $SourceBranch into $IntegrationBranch" 2>&1 | Select-Object -Last 3
         if ($LASTEXITCODE -ne 0) {
             git merge --abort 2>$null
-            git checkout $startBranch 2>&1 | Select-Object -Last 1
+            git checkout $startBranch 2>$null | Out-Null
             throw "merge conflict while merging $SourceBranch into $IntegrationBranch - resolve manually"
         }
         if (-not (Invoke-Push -Ref $IntegrationBranch -Remote $Remote)) { throw "push of $IntegrationBranch failed" }
