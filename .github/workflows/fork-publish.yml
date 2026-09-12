@@ -69,4 +69,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          ./scripts/fork-release.ps1 -Repo "${{ github.repository }}" -Tag fork-latest -Branch fork/main -Jar build/libs/SiliconDesktop.jar
+          ./scripts/fork-release.ps1 -Repo "${{ github.repository }}" -Tag fork-latest -Branch fork/main -PushRemote origin -Jar build/libs/SiliconDesktop.jar

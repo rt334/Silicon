@@ -19,6 +19,7 @@ param(
     [string]$ModFile = 'mod.hjson',
     [string]$ReadmeFile = 'README.md',
     [string]$Token = '',
+    [string]$PushRemote = 'rt334',
     [string]$WorkDir = 'build',
     [int]$CommitCount = 10,
     [switch]$SkipRelease,
@@ -150,7 +151,7 @@ if (-not $SkipReadme) {
             git commit -F $msgFile | Out-Null
             Write-Host "[fork-release] README block committed ($sha)"
             if (-not $NoPush) {
-                if (Invoke-Push -Ref 'HEAD' -Remote origin -Token $token) {
+                if (Invoke-Push -Ref 'HEAD' -Remote $PushRemote -Token $token) {
                     Write-Host '[fork-release] README commit pushed'
                 } else {
                     Write-Host '[fork-release] WARNING: README commit not pushed (network)'
@@ -165,3 +166,5 @@ if (-not $SkipReadme) {
 }
 
 Write-Host '[fork-release] done'
+
+exit 0
