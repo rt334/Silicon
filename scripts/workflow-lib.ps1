@@ -59,6 +59,28 @@ function Get-RemoteSlug {
     return ''
 }
 
+function Invoke-Fetch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Remote,
+        [string]$Branch = '',
+        [int]$Attempts = 5,
+        [switch]$Quiet
+    )
+    # GitHub is reached either directly or through the local proxy depending on the
+    # moment; try both routes before giving up.
+    for ($i = 1; $i -le $Attempts; $i++) {
+        if ($Branch -ne '') { $out = git -c credential.helper= fetch $Remote $Branch 2>&1 }
+        else { $out = git -c credential.helper= fetch $Remote 2>&1 }
+        if ($LASTEXITCODE -eq 0) { return $true }
+        if ($Branch -ne '') { $out = git -c credential.helper= -c http.proxy=http://127.0.0.1:7897 fetch $Remote $Branch 2>&1 }
+        else { $out = git -c credential.helper= -c http.proxy=http://127.0.0.1:7897 fetch $Remote 2>&1 }
+        if ($LASTEXITCODE -eq 0) { return $true }
+        if (-not $Quiet) { Write-Host "[fetch] $Remote attempt $i failed: $(($out | Select-Object -Last 1))" }
+        Start-Sleep -Seconds 6
+    }
+    return $false
+}
+
 function Invoke-Push {
     param(
         [Parameter(Mandatory = $true)][string]$Ref,
