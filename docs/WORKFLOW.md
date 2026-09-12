@@ -40,12 +40,14 @@ powershell -ExecutionPolicy Bypass -File scripts\fork-publish.ps1 -Message "[a0.
 
 1. 提交当前改动（`-Message` / `-MessageFile`，UTF-8 文件避免 PowerShell 引号问题）
 2. 推送源分支到 `rt334`
-3. 把源分支 **`--no-ff` 并入集成分支 `fork/main`**（冲突则中止并恢复原分支，让你手动解）
+3. 把本地 `fork/main` **先快进到远端**（CI 每次都会往它加一个 README 区块提交），再把源分支 **`--no-ff` 并入**（冲突则中止并恢复原分支，让你手动解）
 4. 构建 jar（gradle，带代理回退）
-5. 刷新滚动 release `fork-latest`（覆盖 jar 资产 + 重写说明）并更新 README 的**最新构建区块**
+5. 刷新滚动 release `fork-latest`（覆盖 jar 资产 + 重写说明）
 6. 安装 jar 到 `%APPDATA%\Mindustry\mods\Silicon.jar`
 
-常用开关：`-SkipCommit`、`-SkipBuild`、`-SkipRelease`、`-SkipReadme`、`-SkipInstall`、`-DryRun`。
+> **README 最新构建区块由 CI 单一维护**：本地流程默认跳过（否则本地与 CI 会各自生成一版同区块提交、下次推送必被非快进拒绝）；确实需要本地写时加 `-LocalReadme`。
+
+常用开关：`-SkipCommit`、`-SkipBuild`、`-SkipRelease`、`-SkipReadme`、`-SkipInstall`、`-LocalReadme`、`-DryRun`。
 
 **CI（无需本地环境）**：推送到 `fork/main` 即触发 `.github/workflows/fork-publish.yml`；需要先把别的分支并进来时，在 Actions 页手动运行该工作流并填 `source_branch`。
 
