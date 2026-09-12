@@ -1,0 +1,10 @@
+{
+  "latestSuffix": "（最新）",
+  "placeholderBullet": "- ",
+  "readmeBlock": "<!-- FORK-BUILD:BEGIN -->\n> **最新构建**（自动维护，请勿手改本区块）：分支 `{branch}` · 提交 `{sha}` · {date} · [下载 jar]({releaseUrl})\n<!-- FORK-BUILD:END -->",
+  "releaseTitle": "Fork 滚动构建（mod {modVersion}）",
+  "releaseNotes": "## Fork 滚动构建\n\n- 分支：`{branch}`\n- 提交：`{sha}`\n- 时间：{date}\n- mod 版本：`{modVersion}`（**fork 构建不改变版本号**；版本号仅在提交上游 PR 时按规则递增）\n- 产物：`{asset}`\n\n### 本次包含的提交\n\n{commits}\n",
+  "readmeCommitMessage": "chore: 更新最新构建区块 [{sha}]",
+  "mergeMessage": "merge: {source} 并入 {target}",
+  "skipCi": "[skip ci]"
+}
