@@ -34,7 +34,9 @@ param(
     [switch]$DryRun
 )
 
-$ErrorActionPreference = 'Stop'
+# Native git/curl calls write progress to stderr; with 'Stop' PowerShell 5.1 turns
+# that into a terminating NativeCommandError. Explicit LASTEXITCODE / HTTP checks are used.
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 . (Join-Path $PSScriptRoot 'workflow-lib.ps1')
