@@ -116,7 +116,8 @@ if (-not $SkipRelease -or -not $SkipReadme) {
         '-File', (Join-Path $PSScriptRoot 'fork-release.ps1'),
         '-Repo', $ReleaseRepo,
         '-Tag', $Tag,
-        '-Branch', $IntegrationBranch
+        '-Branch', $IntegrationBranch,
+        '-PushRemote', $Remote
     )
     if ($SkipRelease) { $psArgs += '-SkipRelease' }
     if ($SkipReadme) { $psArgs += '-SkipReadme' }
@@ -140,7 +141,9 @@ if (-not $SkipInstall) {
 
 # restore the branch the user started on
 if (-not $DryRun -and $SourceBranch -ne $IntegrationBranch) {
-    git checkout $startBranch 2>&1 | Select-Object -Last 1
+    git checkout $startBranch 2>$null | Out-Null
 }
 
 Write-Host "[fork-publish] done. version untouched (bump only for upstream PRs via scripts/version-bump.ps1)"
+
+exit 0
