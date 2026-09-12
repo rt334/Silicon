@@ -1,0 +1,72 @@
+name: Fork Publish
+
+# 到 rt334 仓库的构建/发布流水线：
+#   - push 到集成分支 fork/main        -> 构建 jar + 刷新滚动 release(fork-latest) + 更新 README 构建区块
+#   - workflow_dispatch（可填 source_branch）-> 先把某个分支并入 fork/main，再走同一流程
+#
+# 版本号不在这里改：按项目规则，版本号只在提交上游 PR 时由 scripts/version-bump.ps1 递增（一个 PR 一个版本）。
+
+on:
+  push:
+    branches: [fork/main]
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Branch to merge into fork/main before publishing (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fork/main
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge source branch (manual dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_branch != '' }}
+        run: |
+          set -e
+          git fetch origin "${{ inputs.source_branch }}"
+          git merge --no-ff -m "merge: ${{ inputs.source_branch }} into fork/main" "origin/${{ inputs.source_branch }}"
+          git push origin HEAD:fork/main
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build jar
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon jar
+
+      - name: Job summary (build info)
+        run: |
+          echo "### Fork build" >> $GITHUB_STEP_SUMMARY
+          echo "- commit: \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- jar: $(stat -c%s build/libs/SiliconDesktop.jar) bytes" >> $GITHUB_STEP_SUMMARY
+
+      - name: Refresh rolling release and README block
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          ./scripts/fork-release.ps1 -Repo "${{ github.repository }}" -Tag fork-latest -Branch fork/main -Jar build/libs/SiliconDesktop.jar
