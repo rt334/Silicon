@@ -269,6 +269,8 @@ public class MusicPlayer {
     private static boolean playing = false;
     private static int localVoiceId = -1;
     private static float lastBlip = 0;
+    /** 用户主动暂停中（可恢复）。与 pausedPosition 区分：后者 seek() 也会写，不能用来判定「暂停中」 */
+    private static boolean pausedByUser = false;
     /** 暂停时保存的进度（秒）；恢复播放时 seek 回该位置 */
     private static float pausedPosition = 0f;
     /** 暂停时保存的声源时长（秒）；暂停后声源被停止、trackLength() 无法再从 voice 读取，
@@ -659,6 +661,23 @@ public class MusicPlayer {
         return enabled && shareEnabled;
     }
 
+    /**
+     * 该 hash 的音频是否正被声源读取（本地播放中，或任一远程声源）。
+     * <p>
+     * 用途：转码器要原地替换 {@code cache/music/wav/<hash>.wav}（超长曲目降采样）时，必须先确认没有
+     * 声源正在流式读这个文件——Windows 下删除被占用的文件会失败（于是降采样失败但不会损坏），
+     * 提前判断可以少走一次失败路径，也避免把正在播给别人的文件换掉。
+     */
+    public static boolean isHashInUse(String hash) {
+        if (hash == null) return false;
+        MusicTrack t = currentTrack();
+        if (playing && t != null && hash.equalsIgnoreCase(t.cacheHash)) return true;
+        for (Voice v : voices) {
+            if (v.hash != null && hash.equalsIgnoreCase(v.hash)) return true;
+        }
+        return false;
+    }
+
     // ------------------------------------------------------------------
     // 周期更新
     // ------------------------------------------------------------------
@@ -686,13 +705,19 @@ public class MusicPlayer {
     private static int nativeState = 0;
     private static float nativeSavedFoutTime = -1f;
     private static float nativeLastStop = -100f;
+    /** 压制开始时刻：状态 1（等游戏自己淡出）超时兜底用 */
+    private static float nativeSuppressStart = -100f;
 
     /**
-     * 本模组音乐的「活跃」判定：正在播放 / 正在起播（转码） / 暂停中。
+     * 本模组音乐的「活跃」判定：正在播放 / 正在起播（转码） / **用户主动暂停中**。
      * 暂停也算活跃——用户只是暂停，没停播，此时不该把游戏自带音乐放回来。
+     * <p>
+     * 注意不能用 {@code pausedPosition > 0} 代替 {@link #pausedByUser}：{@code seek()} 也会写
+     * pausedPosition（拖动进度条记录恢复点），那样「只是拖了下进度条」就会误判成活跃、
+     * 把游戏自带音乐压掉。
      */
     public static boolean isAudioActive() {
-        return playing || isStarting() || pausedPosition > 0f;
+        return playing || isStarting() || pausedByUser;
     }
 
     /**
@@ -736,17 +761,33 @@ public class MusicPlayer {
 
             if (nativeState == 0) {
                 nativeState = sc.getCurrent() == null ? 2 : 1;
+                nativeSuppressStart = Time.time;
                 nativeSavedFoutTime = sc.foutTime;
                 sc.foutTime = NATIVE_FADE_TIME;
                 Log.info("[Music] native music suppressed (fout=" + nativeSavedFoutTime + " -> " + NATIVE_FADE_TIME
                         + ", current=" + (sc.getCurrent() == null ? "none" : "playing") + ")");
             } else if (nativeState == 1) {
-                // 游戏自己在 update() 里淡出，current 归空即淡出完成
-                if (sc.getCurrent() == null) nativeState = 2;
-            } else if (sc.getCurrent() != null && Time.time - nativeLastStop > 2f) {
-                // 已静音期间它又挑到新曲（playOnce 不检查 silenced）→ 停掉。新曲淡入 120 秒、音量≈0，听不出来
-                nativeLastStop = Time.time;
-                sc.stop();
+                // 游戏自己在 update() 里淡出（每帧调 silence() → play(null)），current 归空即淡出完成。
+                // 但若它内部 silenced 已是 true，play(null) 会直接 return、根本不会淡出——它自己
+                // playRandom()→playOnce() 挑过新曲后就是这个状态（playOnce 不清 silenced）。
+                // 那种情况必须超时兜底硬停，否则原生音乐会一直以满音量压在我们的音乐上，且状态机永远卡在 1。
+                if (sc.getCurrent() == null) {
+                    nativeState = 2;
+                } else if (Time.time - nativeSuppressStart > NATIVE_FADE_TIME * 2f + 0.5f) {
+                    Log.warn("[SiliconMusic] native music fade timeout (silenced internally), hard stop");
+                    sc.stop();
+                    nativeState = 2;
+                }
+            } else if (sc.getCurrent() != null) {
+                // 已静音期间它又挑到新曲（playOnce 不检查 silenced，且 playOnce 把音量直接设为满值，
+                // 不是慢慢淡入）——所以游戏内逐帧补停，绝不与我们的音乐重叠；
+                // 主菜单里游戏每帧都会重新 play(Musics.menu)，逐帧停会造成原生声源每秒 60 次建/销，
+                // 改为 5 秒一次的节奏（菜单曲是 120 秒淡入，前几秒本来听不到）。
+                float gap = mindustry.Vars.state.isMenu() ? 5f : 0f;
+                if (Time.time - nativeLastStop >= gap) {
+                    nativeLastStop = Time.time;
+                    sc.stop();
+                }
             }
         } catch (Throwable t) {
             // 压制失败绝不能影响本模组播放
@@ -1411,12 +1452,15 @@ public class MusicPlayer {
         pausedLength = cl > 0f ? cl : -1f;
         // 暂停本地声源（同时暂停所有远程声源：暂停=全部静音，避免「暂停了还在播别人的」）
         stopLocal();
+        // stopLocal 会清 pausedByUser（它是「声源已停」的通用清理），所以这里在它之后重新置位
+        pausedByUser = true;
         setAllRemotePaused(true);
         bcast("pause");
     }
 
     public static void resume() {
         if (playing) return;
+        pausedByUser = false;
         // 不再 gated by enabled：enabled 只控制网络收发，本地恢复播放随时可用
         // 从未选曲（current=-1，如刚打开游戏直接按播放）时从第一首开始，而非静默无响应
         if (current < 0 && tracks.size > 0) current = 0;
@@ -1481,6 +1525,8 @@ public class MusicPlayer {
             localVoiceId = -1;
         }
         playing = false;
+        // 声源已停 → 不再算「用户暂停中」（pause() 会在本调用之后重新置位）
+        pausedByUser = false;
         unregisterLocalVoice();
     }
 

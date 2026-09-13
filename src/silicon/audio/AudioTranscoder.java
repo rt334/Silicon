@@ -216,11 +216,9 @@ public class AudioTranscoder {
         }
         if (out.exists() && out.length() > 44) {
             // 已有缓存：体积超上限的长曲先压回预算内再交给播放（旧版本缓存下来的 44 分钟 m4a 有 471MB，
-            // 缓存预算只有 512MB，两首长曲就会把其它曲目挤出去）。仅在「当前没有声源在流式读取这个文件」时做，
-            // 避免重写正在播放的文件——所以判断的是「正在播放的曲目 == 该 hash」，而不是「当前曲目 == 该 hash」。
-            silicon.audio.MusicTrack cur = MusicPlayer.currentTrack();
-            boolean inUse = MusicPlayer.isPlaying() && MusicPlayer.currentVoiceId() >= 0
-                    && cur != null && hash.equalsIgnoreCase(cur.cacheHash);
+            // 缓存预算只有 512MB，两首长曲就会把其它曲目挤出去）。仅在「没有任何声源在读这个文件」时做
+            // （本地播放中、或正被共享给远程玩家都算在用），避免重写正在读取的文件。
+            boolean inUse = MusicPlayer.isHashInUse(hash);
             if (!inUse && out.length() > maxWavBytes() && queued.putIfAbsent(hash, Boolean.TRUE) == null) {
                 progress.put(hash, -1f);
                 pool.submit(() -> {
