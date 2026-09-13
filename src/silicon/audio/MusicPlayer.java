@@ -83,12 +83,142 @@ public class MusicPlayer {
         return dir;
     }
 
-    /** 缓存目录下指定名称的文件（自动确保父目录存在） */
+    /** 缓存目录下指定名称的文件（自动确保父目录存在）。
+     * <p>
+     * 传入的名字由「曲目 hash / 内置 key + 扩展名」拼成，而 hash 与 ext 都可能来自联机对端
+     * 或被手工编辑过的设置文件，因此这里做两道防护：
+     * 1) 只保留 [A-Za-z0-9._-]，并抹掉上跳序列——路径穿越 / 任意扩展名写入到此为止；
+     * 2) 解析出的绝对路径必须仍在缓存根目录内（双保险）。
+     * 不做抛异常处理：宁可让该曲目「找不到缓存」，也不要让被篡改的配置把游戏崩在启动阶段。 */
     public static Fi cacheFile(String name) {
-        return cacheRoot().child(name);
+        Fi dir = cacheRoot();
+        String safe = name == null ? "invalid" : name;
+        safe = safe.replace("..", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.isEmpty() || safe.equals(".") || safe.equals("_")) safe = "invalid";
+        Fi f = dir.child(safe);
+        try {
+            String base = dir.absolutePath();
+            String path = f.absolutePath();
+            if (base != null && path != null && !path.startsWith(base)) {
+                SiliconLog.log("unsafe music cache name rejected: " + name);
+                f = dir.child("invalid");
+            }
+        } catch (Exception ignored) {
+        }
+        return f;
     }
     /** 声场衰减参考半径（格）：>1200 基本听不见 */
     static final float FALLOFF_RADIUS = 1200f;
+
+    /** 转码产物路径：{@code cache/music/wav/<name>}。
+     *  放在独立子目录，避免被「扫 &lt;hash&gt;.* 找源缓存」的逻辑误当成源文件，
+     *  也避免 evictHashVariants 把源文件当同 hash 变体删掉。 */
+    public static Fi wavCacheFile(String name) {
+        Fi dir = cacheRoot().child("wav");
+        try {
+            dir.mkdirs();
+        } catch (Exception ignored) {
+        }
+        String safe = name == null ? "invalid" : name.replace("..", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.isEmpty()) safe = "invalid";
+        Fi f = dir.child(safe);
+        try {
+            String base = dir.absolutePath();
+            String path = f.absolutePath();
+            if (base != null && path != null && !path.startsWith(base)) f = dir.child("invalid");
+        } catch (Exception ignored) {
+        }
+        return f;
+    }
+
+    /** 已存在的转码 WAV（可播放且 seek 精确）；没有则返回 null */
+    public static Fi transcodedWav(String hash) {
+        if (hash == null || !MusicNetwork.isValidHash(hash)) return null;
+        try {
+            Fi f = wavCacheFile(hash + ".wav");
+            return (f != null && f.exists() && f.length() > 44) ? f : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 按 hash 查曲目时长（秒）；未知返回 -1。转码进度换算用。 */
+    public static float trackLengthSeconds(String hash) {
+        if (hash == null) return -1f;
+        for (MusicTrack t : tracks) {
+            if (t != null && hash.equals(t.cacheHash)) {
+                try {
+                    Fi f = resolveToPlayableFile(t);
+                    if (f != null && f.exists()) return readLengthFrom(f);
+                } catch (Exception ignored) {
+                }
+                return -1f;
+            }
+        }
+        return -1f;
+    }
+
+    /** 该文件是否需要先转码才能「播放 + 拖动精确」。
+     *  wav 本身即采样级可 seek；ogg 在 SoLoud 里流式 seek 表现正常，二者直接播。
+     *  其余（mp3/flac/m4a/aac/wma…）统一转 WAV：mp3 流式 seek 会跳错、flac 会归零、
+     *  其它格式 SoLoud 根本没有解码器。 */
+    public static boolean needsTranscode(Fi file) {
+        if (file == null) return false;
+        String p = file.absolutePath();
+        if (p == null) return false;
+        String low = p.toLowerCase();
+        return !(low.endsWith(".wav") || low.endsWith(".ogg"));
+    }
+
+    /** 缓存池上限：超过即按最后修改时间淘汰「未被任何曲目引用」的文件（原先只增不减） */
+    private static final long CACHE_MAX_BYTES = 512L * 1024 * 1024;
+    private static final int CACHE_MAX_FILES = 512;
+
+    /** 清理缓存：先删最旧且未被引用的文件，直到回到预算内；.part 暂存不在此处处理 */
+    public static void enforceCacheBudget() {
+        try {
+            Fi dir = cacheRoot();
+            if (dir == null || !dir.isDirectory()) return;
+            Seq<Fi> files = new Seq<>();
+            long total = 0;
+            // 源缓存（cache/music/*.ext）与转码产物（cache/music/wav/*.wav）都纳入预算
+            Seq<Fi> scan = new Seq<>();
+            scan.add(dir);
+            Fi wavDir = dir.child("wav");
+            if (wavDir.isDirectory()) scan.add(wavDir);
+            for (Fi d : scan) {
+                for (Fi f : d.list()) {
+                    if (f == null || f.isDirectory()) continue;
+                    if ("part".equalsIgnoreCase(f.extension())) continue;
+                    files.add(f);
+                    total += f.length();
+                }
+            }
+            if (files.size <= CACHE_MAX_FILES && total <= CACHE_MAX_BYTES) return;
+            files.sort((a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            int removed = 0;
+            for (Fi f : files) {
+                if (files.size - removed <= CACHE_MAX_FILES && total <= CACHE_MAX_BYTES) break;
+                if (isReferenced(f.nameWithoutExtension())) continue; // 仍被曲目引用的不动
+                long len = f.length();
+                if (f.delete()) {
+                    total -= len;
+                    removed++;
+                }
+            }
+            if (removed > 0) SiliconLog.log("music cache pruned " + removed + " file(s), now " + total + " bytes");
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 该 hash 是否仍被曲目引用 */
+    private static boolean isReferenced(String hash) {
+        if (hash == null) return false;
+        for (MusicTrack t : tracks) {
+            if (t != null && hash.equals(t.cacheHash)) return true;
+        }
+        return false;
+    }
 
     private static final Seq<MusicTrack> tracks = new Seq<>();
     private static final Seq<Voice> voices = new Seq<>();
@@ -968,12 +1098,33 @@ public class MusicPlayer {
         // 直接创建声源会原生崩溃 → 阻止并在日志说明（仅排除本机解码，仍可分享字节给他人）
         // （flac 已实测可解码：短曲走全量加载，见下方 flac 分支）
         if (t.isUrl() || t.isLocal()) {
+            // 需要「精确拖动」的格式（mp3/flac/以及 Soloud 根本不支持的 m4a/aac/wma…）：
+            // 有 FFmpeg 时统一转成 WAV 再播——WAV 采样级 seek，拖动立刻精确；
+            // 没有 FFmpeg 则退回原有行为（能播的照播，不能播的给出明确提示）。
+            if (needsTranscode(file)) {
+                Fi wav = transcodedWav(t.cacheHash);
+                if (wav != null) {
+                    file = wav;
+                } else if (AudioTranscoder.isAvailable()) {
+                    final int target = index;
+                    final String hash = t.cacheHash;
+                    final Fi src = file;
+                    toast("musicplayer.transcoding", t.name);
+                    AudioTranscoder.request(src, hash, () -> {
+                        if (current == target && !playing) {
+                            beginPlayback(target);
+                            if (playing) bcast("play");
+                        }
+                    }, msg -> toast("musicplayer.transcodeFail", t.name));
+                    return;
+                }
+            }
             if (!isDecodablePath(file.absolutePath())) {
-                Log.warn("Blocked play of undecodable " + t.name + " (Soloud only decodes ogg/mp3/wav/flac)");
+                Log.warn("Blocked play of undecodable " + t.name + " (Soloud decodes ogg/mp3/wav/flac; configure FFmpeg for more)");
                 playing = false;
                 localVoiceId = -1;
                 // UI 反馈：不可解码格式此前静默无反应（问题15「不能播放」无任何提示）
-                toast("musicplayer.undecodable", t.name);
+                toast(AudioTranscoder.isAvailable() ? "musicplayer.transcodeFail" : "musicplayer.needFfmpeg", t.name);
                 return;
             }
         }
@@ -1729,6 +1880,7 @@ public class MusicPlayer {
             Fi finalFile = cacheFileForHash(hash, e);
             staging.moveTo(finalFile);
             hashExt.put(hash, e);
+            enforceCacheBudget(); // 收下一个文件后按预算淘汰旧缓存，避免无限占盘
             return finalFile.exists();
         } catch (Exception ex) {
             SiliconLog.log("Cache finalize fail " + hash + ": " + ex.getMessage());

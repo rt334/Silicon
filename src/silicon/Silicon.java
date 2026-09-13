@@ -157,6 +157,14 @@ public class Silicon extends Mod {
                 st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
                 // —— 音乐播放器 ——
                 st.pref(new CustomSetting(t -> t.button(Core.bundle.get("musicplayer.open"), Styles.defaultt, MusicPlayerDialog::open).width(200f).padTop(6f)));
+                // FFmpeg 路径（可选）：填了就能播放/精确拖动任意格式（m4a/aac/wma…），留空则只用内置解码
+                st.pref(new CustomSetting(t -> {
+                    t.add(Core.bundle.get("musicplayer.ffmpeg")).left().padRight(8f);
+                    t.field(Core.settings.getString(silicon.audio.AudioTranscoder.CFG_FFMPEG, ""), s -> {
+                        Core.settings.put(silicon.audio.AudioTranscoder.CFG_FFMPEG, s == null ? "" : s.trim());
+                        silicon.audio.AudioTranscoder.resetProbe();
+                    }).growX().height(36f).padTop(4f);
+                }));
                 // 灰色细线：与「恢复默认设置」分隔（注册为设置项，rebuild 时保留）
                 st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
 

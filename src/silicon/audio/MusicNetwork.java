@@ -68,6 +68,34 @@ public class MusicNetwork {
     /** 每 tick 最多发送的分块数 */
     private static final int CHUNKS_PER_TICK = 12;
 
+    // ------------------------------------------------------------------
+    // 接收侧/中转侧安全上限
+    //
+    // 联机对端不可信：分块包由任意客户端发出、经服务端原样转发，因此所有
+    // 「对方可控」的数值在落盘/分配内存之前必须先夹取，否则可被用于 OOM、
+    // 磁盘写爆与越界写文件。
+    // ------------------------------------------------------------------
+
+    /** hash 唯一合法形态：SHA-256 前 16 位小写十六进制（与 MusicTrack.cacheHash 一致）。
+     *  严格白名单同时挡住路径穿越（`..`/分隔符）与任意扩展名写入。 */
+    private static final java.util.regex.Pattern HASH_PATTERN = java.util.regex.Pattern.compile("^[0-9a-f]{16}$");
+    /** 分块数上限：24KB × 4096 ≈ 96MB；用于阻断 chunkCount=Integer.MAX_VALUE 造成的巨型数组分配 */
+    private static final int MAX_CHUNK_COUNT = 4096;
+    /** 单曲接收字节上限（64MB） */
+    private static final long MAX_SHARE_BYTES = 64L * 1024 * 1024;
+    /** 服务端转发速率上限：单玩家 2MB/s（1 秒滑动窗口） */
+    private static final long MAX_RELAY_BYTES_PER_SEC = 2L * 1024 * 1024;
+
+    /** hash 是否为合法形态（接收任何 hash 之前都必须过这一关） */
+    static boolean isValidHash(String hash) {
+        return hash != null && HASH_PATTERN.matcher(hash).matches();
+    }
+
+    /** 服务端：玩家 key → 该玩家当前广播的曲目 hash；分块必须与其匹配才转发 */
+    private static final ObjectMap<String, String> relayHash = new ObjectMap<>();
+    /** 服务端：玩家 key → [窗口起点(ms), 本窗口已转发字节] */
+    private static final ObjectMap<String, long[]> relayQuota = new ObjectMap<>();
+
     private MusicNetwork() {}
 
     public static void init() {
@@ -112,13 +140,32 @@ public class MusicNetwork {
         if (serverRegistered) return;
         if (netServer == null) return;
         serverRegistered = true;
-        // 服务端收到客户端上报并转发给所有客户端
+        // 服务端收到客户端上报并转发给所有客户端。
+        // 这里同时充当信任边界：记录「谁在广播哪个 hash」，随后只转发与其匹配的分块，
+        // 并施加速率上限——否则任意客户端都能让服务端替它向全场推送任意字节。
         netServer.addPacketHandler(MSG_SYNC, (p, data) -> {
-            if (p == null) return;
+            if (p == null || data == null) return;
+            String key = playerKey(p);
+            try {
+                String op = extract(data, "op");
+                String hash = extract(data, "hash");
+                if ("stop".equals(op)) {
+                    relayHash.remove(key);
+                } else if (op != null && (op.equals("play") || op.equals("next"))) {
+                    if (isValidHash(hash)) relayHash.put(key, hash);
+                    else relayHash.remove(key);
+                }
+            } catch (Exception ignored) {
+            }
             Call.clientPacketReliable(MSG_SYNC, data);
         });
         netServer.addPacketHandler(MSG_META, (p, data) -> {
-            if (p == null) return;
+            if (p == null || data == null) return;
+            try {
+                String hash = extract(data, "hash");
+                if (isValidHash(hash)) relayHash.put(playerKey(p), hash);
+            } catch (Exception ignored) {
+            }
             Call.clientPacketReliable(MSG_META, data);
         });
         netServer.addPacketHandler(MSG_POS, (p, data) -> {
@@ -127,8 +174,45 @@ public class MusicNetwork {
         });
         netServer.addBinaryPacketHandler(MSG_CHUNK, (p, bytes) -> {
             if (p == null || bytes == null) return;
+            if (bytes.length <= HEADER_LEN || bytes.length > HEADER_LEN + CHUNK_SIZE) return; // 块长越界
+            String hash = readHash(bytes);
+            if (!isValidHash(hash)) return;
+            String key = playerKey(p);
+            String announced = relayHash.get(key);
+            if (announced == null || !announced.equals(hash)) {
+                // 该玩家并未广播此曲目（或已停止）→ 丢弃，防冒名/无主数据
+                return;
+            }
+            if (!allowRelay(key, bytes.length)) return; // 速率上限
             Call.clientBinaryPacketReliable(MSG_CHUNK, bytes);
         });
+    }
+
+    /** 玩家在转发层的唯一 key（uuid 优先，回退 id） */
+    private static String playerKey(Player p) {
+        if (p == null) return "none";
+        String uuid = p.uuid();
+        return (uuid != null && !uuid.isEmpty()) ? uuid : ("id:" + p.id());
+    }
+
+    /** 从分块包头读出 hash（16 字节 UTF-8） */
+    private static String readHash(byte[] bytes) {
+        if (bytes == null || bytes.length < HEADER_LEN) return null;
+        byte[] hashBytes = new byte[16];
+        System.arraycopy(bytes, 0, hashBytes, 0, 16);
+        return new String(hashBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+    }
+
+    /** 每秒转发字节配额（简单滑动窗口，超限即丢包，避免服务端被单玩家刷爆上行） */
+    private static boolean allowRelay(String key, int bytes) {
+        long now = System.currentTimeMillis();
+        long[] q = relayQuota.get(key);
+        if (q == null || now - q[0] >= 1000L) {
+            q = new long[]{now, 0L};
+            relayQuota.put(key, q);
+        }
+        q[1] += bytes;
+        return q[1] <= MAX_RELAY_BYTES_PER_SEC;
     }
 
     // ------------------------------------------------------------------
@@ -165,15 +249,17 @@ public class MusicNetwork {
     }
 
     private static void emitSyncSimple(String owner, String op) {
-        String payload = "{\"owner\":\"" + owner + "\",\"op\":\"" + op + "\"}";
+        String payload = "{\"owner\":\"" + escape(owner) + "\",\"op\":\"" + escape(op) + "\"}";
         sendReliable(MSG_SYNC, payload);
     }
 
     private static void emitSync(String owner, String op, MusicTrack t) {
         StringBuilder sb = new StringBuilder();
-        sb.append("{\"owner\":\"").append(owner)
-          .append("\",\"op\":\"").append(op)
-          .append("\",\"hash\":\"").append(t.cacheHash)
+        // 所有字符串字段一律转义：hash/type 此前未转义，任何含引号的值都会破坏 JSON 结构，
+        // 接收端的手写提取器随之被注入伪造字段（如 ext）。
+        sb.append("{\"owner\":\"").append(escape(owner))
+          .append("\",\"op\":\"").append(escape(op))
+          .append("\",\"hash\":\"").append(escape(t.cacheHash))
           .append("\",\"name\":\"").append(escape(t.name))
           .append("\",\"type\":").append(t.type);
         if (t.isUrl() && t.source != null) {
@@ -358,17 +444,21 @@ public class MusicNetwork {
                 ownerPos.put(owner, new float[]{ox, oy});
             }
 
-            if (op.equals("stop")) {
+            if ("stop".equals(op)) {
                 MusicPlayer.stopRemoteVoice(owner);
                 ownerHash.remove(owner);
                 recv.remove(owner);
                 return;
             }
-            if (op.equals("pause")) { MusicPlayer.pauseRemoteVoice(owner); return; }
-            if (op.equals("resume")) { MusicPlayer.resumeRemoteVoice(owner); return; }
+            if ("pause".equals(op)) { MusicPlayer.pauseRemoteVoice(owner); return; }
+            if ("resume".equals(op)) { MusicPlayer.resumeRemoteVoice(owner); return; }
 
-            // play / next
-            if (owner == null || hash == null) return;
+            // play / next：字段必须合法才继续（对端可控，非法值会流进缓存命名与下载路径）
+            if (!"play".equals(op) && !"next".equals(op)) return;
+            if (hash == null) return;
+            if (type != MusicTrack.INTERNAL && !isValidHash(hash)) return; // 内置曲目用 key，其余必须是合法 hash
+            if (type != MusicTrack.INTERNAL && type != MusicTrack.URL && type != MusicTrack.LOCAL) return;
+            if (url != null && !isHttpUrl(url)) return;
             ownerHash.put(owner, hash);
             MusicPlayer.stopRemoteVoice(owner); // 切换曲目时先停旧的
 
@@ -471,26 +561,49 @@ public class MusicNetwork {
             String hash = extract(data, "hash");
             int chunks = parseInt(extract(data, "chunks"), 0);
             String ext = extract(data, "ext");
-            if (owner == null || hash == null || chunks <= 0 || isSelf(owner)) return;
+            if (owner == null || isSelf(owner)) return;
+            // 与 onChunk 同一套闸门：hash 白名单 + 分块数上限（此处同样会分配 boolean[]，
+            // 未校验的 chunks 是第二个 OOM 入口）
+            if (!isValidHash(hash)) return;
+            if (chunks <= 0 || chunks > MAX_CHUNK_COUNT) return;
+            if ((long) chunks * CHUNK_SIZE > MAX_SHARE_BYTES) return;
             ownerHash.put(owner, hash);
-            if (ext != null && !ext.isEmpty()) MusicPlayer.registerHashExt(hash, ext);
+            String safeExt = sanitizeExt(ext);
+            if (safeExt != null) MusicPlayer.registerHashExt(hash, safeExt);
             if (MusicPlayer.hasCache(hash)) return; // 已有缓存，无需接收分块
             // 建接收缓冲与缓存文件（先写占位）
             ChunkRecv r = new ChunkRecv();
             r.hash = hash;
-            r.ext = ext;
+            r.ext = safeExt;
             r.chunkCount = chunks;
             r.received = new boolean[chunks];
             r.total = chunks;
-            recv.put(owner, r);
+            recv.put(hash, r); // 与 onChunk 统一按 hash 建键（此前按 owner，依赖线性兜底查找）
         } catch (Exception e) {
             Log.info("[SiliconMusic] onMeta err: " + e.getMessage());
         }
     }
 
+    /** 扩展名白名单：仅允许 1~5 位小写字母数字，返回带点形式；非法返回 null。
+     *  扩展名会成为缓存文件名的一部分，必须收紧。 */
+    static String sanitizeExt(String ext) {
+        if (ext == null) return null;
+        String e = ext.trim().toLowerCase();
+        if (e.startsWith(".")) e = e.substring(1);
+        return e.matches("[a-z0-9]{1,5}") ? "." + e : null;
+    }
+
+    /** 仅接受 http/https 下载地址（避免对端塞入 file:/jar: 等本地协议） */
+    static boolean isHttpUrl(String url) {
+        if (url == null) return false;
+        String u = url.trim().toLowerCase();
+        return u.startsWith("http://") || u.startsWith("https://");
+    }
+
     private static void onChunk(byte[] payload) {
         if (!MusicPlayer.canReceive()) return;
         if (payload == null || payload.length < HEADER_LEN) return;
+        if (payload.length > HEADER_LEN + CHUNK_SIZE) return; // 块长越界
         try {
             ByteArrayInputStream bis = new ByteArrayInputStream(payload, 0, HEADER_LEN);
             DataInputStream dis = new DataInputStream(bis);
@@ -499,9 +612,15 @@ public class MusicNetwork {
             int chunkCount = dis.readInt();
             int idx = dis.readInt();
             String hash = new String(hashBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
-            if (hash == null || hash.isEmpty()) return;
+            // 闸门 1：hash 必须是 SHA-256 前 16 位十六进制。
+            // 它同时是缓存文件名的一部分，严格白名单可一次性挡住路径穿越与任意扩展名写入。
+            if (!isValidHash(hash)) return;
+            // 闸门 2：分块数由对方提供，直接用于分配数组会是 OOM 入口（如 0x7FFFFFFF）
+            if (chunkCount <= 0 || chunkCount > MAX_CHUNK_COUNT) return;
             int dataLen = payload.length - HEADER_LEN;
             if (dataLen <= 0) return;
+            // 闸门 3：已有缓存不接受任何覆盖（防用同 hash 替换本机已缓存音频）
+            if (MusicPlayer.hasCache(hash)) return;
 
             ChunkRecv r = recvByHash(hash);
             if (r == null) {
@@ -512,8 +631,17 @@ public class MusicNetwork {
                 r.total = -1;
                 r.received = new boolean[chunkCount];
                 recv.put(hash, r);
+            } else if (r.received == null || r.received.length != chunkCount) {
+                return; // 与已声明的块数不一致 → 放弃，防用错块数把文件拼坏
             }
             if (idx < 0 || idx >= r.received.length || r.received[idx]) return;
+            // 闸门 4：单曲累计字节上限（防无限刷盘）
+            if (r.bytes + dataLen > MAX_SHARE_BYTES) {
+                recvRemoveByHash(hash);
+                try { MusicPlayer.stagingFile(hash).delete(); } catch (Exception ignored) {}
+                Log.info("[SiliconMusic] drop oversized share " + hash + " (> " + MAX_SHARE_BYTES + " bytes)");
+                return;
+            }
 
             // 追加写暂存文件：reliable 包有序，按到达顺序 append；未收齐前不视为正式缓存
             Fi staging = MusicPlayer.stagingFile(hash);
@@ -524,6 +652,7 @@ public class MusicNetwork {
             }
             r.received[idx] = true;
             r.receivedCount++;
+            r.bytes += dataLen;
 
             if (r.receivedCount >= r.received.length) {
                 // 收齐 → 把暂存文件 moveTo 转正式缓存，再尝试按 owner 播放
@@ -666,6 +795,8 @@ public class MusicNetwork {
         int total;
         boolean[] received;
         int receivedCount;
+        /** 已接收字节数（用于单曲上限，防无限刷盘） */
+        long bytes;
     }
 
     /** 是否正在下载该 hash 的 URL 曲目（供 UI 显示“下载中”） */
