@@ -199,7 +199,7 @@ public class MusicPlayer {
             int removed = 0;
             for (Fi f : files) {
                 if (files.size - removed <= CACHE_MAX_FILES && total <= CACHE_MAX_BYTES) break;
-                if (isReferenced(f.nameWithoutExtension())) continue; // 仍被曲目引用的不动
+                // 源缓存：仍被曲目引用的不动；转码产物（wav/）是派生文件，按 LRU 删（代价只是重新解码）`n                boolean isTranscode = "wav".equalsIgnoreCase(f.parent() == null ? "" : f.parent().name());`n                if (!isTranscode && isReferenced(f.nameWithoutExtension())) continue;
                 long len = f.length();
                 if (f.delete()) {
                     total -= len;
@@ -1510,14 +1510,22 @@ public class MusicPlayer {
     private static float readLengthFrom(Fi f) {
         if (f == null || !f.exists()) return -1f;
         String key = f.absolutePath();
+        Float cached = lengthCache.get(key);
+        if (cached != null) return cached;
+        // 1) 纯 Java 元数据探测优先：flac/mp3 完全不走 SoLoud。
+        //    当前游戏的 SoLoud 已不支持 flac——对它调 Music.create 会抛错刷屏且拿不到时长；
+        //    flac 读 STREAMINFO、mp3 帧扫描/码率估算，毫秒级且稳定。
+        float probed = silicon.audio.decode.TrackProbe.durationSeconds(f.file());
+        if (probed > 0f) {
+            lengthCache.put(key, probed);
+            return probed;
+        }
         if (!isAsciiPath(key)) return -1f; // 非 ASCII 路径不读（防 Soloud 内部锁崩溃），由 ASCII 缓存补齐
-        if (!isDecodablePath(key)) return -1f; // m4a/wma/aac/opus 无 Soloud 解码器，探测会原生失败 → 跳过（flac 已实测可探测）
+        if (!isDecodablePath(key)) return -1f; // m4a/wma/aac/opus 无 Soloud 解码器，探测会原生失败 → 跳过
         if (f.length() > LENGTH_READ_SIZE_LIMIT) {
             Log.warn("[SiliconMusic] file too large for length probe: " + f.name() + " (" + f.length() + " bytes)");
             return -1f;
         }
-        Float cached = lengthCache.get(key);
-        if (cached != null) return cached;
         float len = -1f;
         try {
             arc.audio.Music m = arc.audio.Music.create(f);
