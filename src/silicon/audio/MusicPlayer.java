@@ -700,6 +700,15 @@ public class MusicPlayer {
         if (!initialized) return;
         // 原生音乐压制要在 player==null（主菜单）时也生效：本模组音乐在主菜单里同样能播
         tickNativeMusic();
+        // 播放/暂停按钮的实时刷新：直接由播放器每帧推送。
+        // 不走元素自身的 update —— arc 的 Element.update(Runnable) 只是把 Runnable 存进一个字段
+        // （bytecode: putfield update）并在 act() 里执行，一旦被覆盖或 act 未跑到，按钮就会停在旧图标上
+        // （用户实测「展开态按钮不实时更新暂停/播放」）。这里由 Trigger.update 驱动的本方法直接刷 UI。
+        try {
+            silicon.ui.MusicBar.syncNow();
+            silicon.ui.MusicPlayerDialog.syncPlayButtonNow();
+        } catch (Throwable ignored) {
+        }
         if (player == null) return;
         // 注意：不再用 enabled 门控整个 update —— enabled 关时本地仍可正常播放（见 setEnabled 注释），
         // 本机声源推进/暂停/倒放/音量刷新必须始终运行；enabled 只影响网络的收发（canReceive/canShare）。

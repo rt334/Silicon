@@ -33,6 +33,19 @@ public class MusicPlayerDialog extends BaseDialog {
     private static final float BTN_H = 34f;
 
     private Table trackTable;
+    /** 主播放/暂停按钮的引用：供 MusicPlayer 每帧推送刷新（元素自身 update 不可靠，见 MusicBar.syncNow 注释） */
+    private ImageButton ppBtn;
+
+    /** 由 MusicPlayer 每帧调用：把播放/起播态直接刷到主按钮上（弹窗没开时是无害的空操作） */
+    public static void syncPlayButtonNow() {
+        MusicPlayerDialog d = instance;
+        if (d == null || d.ppBtn == null || !d.isShown() || d.getScene() != Core.scene) return;
+        boolean p = MusicPlayer.isPlaying();
+        boolean starting = !p && MusicPlayer.isStarting();
+        if (d.ppBtn.getImage() == null) return;
+        d.ppBtn.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
+        d.ppBtn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
+    }
     /** 当前专辑筛选（null = 全部曲目） */
     private String filterAlbum = null;
     private String filterText = "";
@@ -208,6 +221,7 @@ public class MusicPlayerDialog extends BaseDialog {
             ctrl.button(Icon.leftSmall, Styles.flati, () -> MusicPlayer.seekRelative(-10f))
                     .growX().height(48f).pad(2f);
             ImageButton pp = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.flati);
+            ppBtn = pp; // 供 MusicPlayer 每帧推送刷新（见 syncPlayButtonNow）
             pp.resizeImage(Scl.scl(26f));
             pp.getImage().setColor(MusicPlayer.isPlaying() ? Pal.accent : Color.white);
             // 修复（2026-09-03 rev5）：主播放/暂停按钮图标此前只在「点击 togglePlay→rebuild」时刷新，

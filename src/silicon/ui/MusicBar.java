@@ -55,6 +55,9 @@ public class MusicBar {
     private static final float DEFAULT_TOP_FRAC = 0.85f;
     private static Table bar;
     private static boolean collapsed = true;
+    /** 当前展开/收起态播放按钮的引用：供 MusicPlayer 每帧推送刷新（元素自身 update 不可靠，见 syncNow） */
+    private static ImageButton playBtn;
+    private static ImageButton collapsedBtn;
 
     private MusicBar() {}
 
@@ -103,6 +106,7 @@ public class MusicBar {
             // 收起态：播放中显示暂停、暂停中显示播放，颜色随状态高亮，悬停显示曲名
             ImageButton btn = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.cleari);
             btn.resizeImage(Scl.scl(26f));
+            collapsedBtn = btn; // 供 MusicPlayer 每帧推送刷新（见 syncNow）
             btn.update(() -> {
                 boolean p = MusicPlayer.isPlaying();
                 boolean starting = !p && MusicPlayer.isStarting();
@@ -150,6 +154,7 @@ public class MusicBar {
             // 播放/暂停
             ImageButton play = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.flati);
             play.resizeImage(Scl.scl(22f));
+            playBtn = play; // 供 MusicPlayer 每帧推送刷新（见 syncNow）
             play.getImage().setColor(MusicPlayer.isPlaying() ? Pal.accent : Color.white);
             play.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("播放/暂停")));
             play.clicked(() -> {
@@ -397,6 +402,15 @@ public class MusicBar {
         if (btn.getImage() == null) return;
         btn.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
         btn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
+    }
+
+    /**
+     * 由 {@link silicon.audio.MusicPlayer} 每帧直接推送刷新（不依赖元素自身的 update，见那边的注释）。
+     * 收起/展开两个播放按钮都在这里统一刷，切换状态立刻反映到图标与颜色。
+     */
+    public static void syncNow() {
+        if (playBtn != null) syncPlayButton(playBtn);
+        if (collapsedBtn != null) syncPlayButton(collapsedBtn);
     }
 
     /** 每帧把播放态同步到按钮图标（相比只在变化时更新，能兜底一切异步建源/暂停/停止路径） */
@@ -661,6 +675,8 @@ public class MusicBar {
         if (bar == null) return;
         bar.remove();
         bar = null;
+        playBtn = null;
+        collapsedBtn = null;
     }
 
     /** 重置悬浮条位置到默认：贴左边缘 + 屏幕高度 {@link #DEFAULT_TOP_FRAC} 处（清除记忆位置设置） */
