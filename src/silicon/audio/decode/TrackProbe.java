@@ -22,8 +22,11 @@ import java.io.InputStream;
  * 返回 -1 表示无法判定，由调用方决定是否退回其他探测方式。
  */
 public class TrackProbe {
-    /** 逐帧扫描的体积上限：超过则用码率估算（扫描是主线程同步调用，不能太慢） */
-    private static final long SCAN_SIZE_LIMIT = 16L * 1024 * 1024;
+    /** 逐帧扫描的体积上限：超过则用码率估算。
+     *  扫描是主线程同步调用（列表重建时每首都要算时长），16MB 全扫要几百毫秒，
+     *  几十首就是数秒卡顿——实测「打开界面很慢」的主因。降到 4MB 后绝大多数曲目走
+     *  码率估算（20ms，误差约 0.15%，仅用于列表显示）。 */
+    private static final long SCAN_SIZE_LIMIT = 4L * 1024 * 1024;
 
     private TrackProbe() {}
 
