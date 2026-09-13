@@ -5,6 +5,8 @@ import arc.Events;
 import arc.func.Cons;
 import arc.graphics.Color;
 import arc.graphics.g2d.TextureRegion;
+import arc.input.KeyBind;
+import arc.input.KeyCode;
 import arc.scene.style.TextureRegionDrawable;
 import arc.scene.ui.TextField;
 import arc.util.Time;
@@ -24,10 +26,13 @@ import silicon.audio.MusicNetwork;
 import silicon.audio.MusicPlayer;
 import silicon.content.block.Blocks;
 import silicon.content.item.Items;
+import silicon.util.MessageSync;
+import silicon.util.MessageSystem;
 import silicon.util.SiliconLog;
 import silicon.util.SignalOverlay;
 import silicon.util.UpdateChecker;
 import silicon.world.blocks.distribution.ItemTransferHubNetwork;
+import silicon.world.blocks.distribution.ItemTransferHub;
 import silicon.world.blocks.power.PowerProtector;
 import silicon.world.blocks.production.MineConverter;
 import silicon.world.blocks.signal.SignalRelay;
@@ -35,12 +40,17 @@ import silicon.world.blocks.signal.SignalSource;
 import silicon.ui.BlockSearch;
 import silicon.ui.MusicBar;
 import silicon.ui.MusicPlayerDialog;
+import silicon.ui.MessagePanel;
 
 import static mindustry.Vars.*;
 
 
 public class Silicon extends Mod {
     public static Mods.LoadedMod MOD;
+    /** 常驻屏幕左边缘的消息面板实例（游戏中显示） */
+    public static MessagePanel messagePanel;
+    /** 消息面板开关按键绑定（默认 I，可在按键设置中重绑定） */
+    public static KeyBind keyToggleMessagePanel;
 
     /**
      * 自定义设置项：在设置表中插入任意内容（分隔线、按钮等）。
@@ -78,6 +88,9 @@ public class Silicon extends Mod {
 
     @Override
     public void init() {
+        // 注册消息面板开关按键（默认 I，可在按键设置中重绑定）
+        keyToggleMessagePanel = KeyBind.add("silicon_toggle_panel", KeyCode.i, "silicon");
+
         // Reset hub network ID counter on world load to avoid ID collisions with saved hubs.
         // 信号源/中继器按队缓存也在世界加载时失效重建（读档后建筑重新加入 Groups.build）。
         // 电力保护器全局状态也需重置。
@@ -91,7 +104,10 @@ public class Silicon extends Mod {
 
         BlockSearch.init();
         MineConverter.initNetworking();
+        ItemTransferHub.initNetworking();
         SignalOverlay.init();
+        // 消息系统多人联网同步（nop 当不在服务器上时，仅注册事件处理器）
+        MessageSync.init();
 
         // —— 音乐播放器：核心/网络/悬浮条初始化 ——
         MusicPlayer.init();
@@ -120,12 +136,27 @@ public class Silicon extends Mod {
         Events.on(EventType.ClientLoadEvent.class, e -> {
             ui.settings.addCategory("@settings.silicon.meta.category.name",
                     new TextureRegionDrawable(new TextureRegion(Silicon.MOD.iconTexture)), st -> {
-                // —— 方块搜索设置 ——
+
+                // —— 方块搜索 ——
+                addSection(st, "setting.silicon.group.blocksearch");
                 st.checkPref("blocksearch.showHistory", true);
                 st.checkPref("blocksearch.clearOnSelect", true);
-                // 灰色细线：搜索设置与暂停设置分隔（注册为设置项，rebuild 时保留）
-                st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
-                // —— 暂停设置 ——
+
+                // —— 消息面板 ——
+                addSection(st, "setting.silicon.group.messagepanel");
+                // 宽度（屏幕宽百分比，20%~50%）与最高位置（屏幕高百分比，20%~80%）
+                st.sliderPref(MessagePanel.SET_WIDTH, (int) MessagePanel.DEFAULT_WIDTH_PERCENT,
+                        (int) MessagePanel.MIN_WIDTH_PERCENT, (int) MessagePanel.MAX_WIDTH_PERCENT, 5,
+                        i -> i + "%", i -> MessagePanel.applySettings());
+                st.sliderPref(MessagePanel.SET_TOP, (int) MessagePanel.DEFAULT_TOP_PERCENT,
+                        (int) MessagePanel.MIN_TOP_PERCENT, (int) MessagePanel.MAX_TOP_PERCENT, 5,
+                        i -> i + "%", i -> MessagePanel.applySettings());
+                st.sliderPref(MessageSystem.SET_MAX_MESSAGES, MessageSystem.DEFAULT_MAX_MESSAGES,
+                        MessageSystem.MIN_MAX_MESSAGES, MessageSystem.MAX_MAX_MESSAGES, 5,
+                        i -> i + "", i -> MessagePanel.applySettings());
+
+                // —— 多人暂停 ——
+                addSection(st, "setting.silicon.group.pause");
                 st.sliderPref("pauseMode", 0, 0, 2, 1,
                         i -> Core.bundle.get("setting.pauseMode.value." + i, String.valueOf(i)),
                         i -> {
@@ -134,24 +165,23 @@ public class Silicon extends Mod {
                         });
                 st.checkPref("pauseRequest", true);
                 st.pref(new CustomSetting(t -> t.button(Core.bundle.get("setting.pauseWhitelist.name"), Styles.defaultt, Silicon::showWhitelistDialog).width(200f).padTop(6f)));
-                // 灰色细线：更新区与上方设置分隔（注册为设置项，rebuild 时保留）
-                st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
-                // —— 更新设置 ——
-                st.checkPref("updatecheck.autoCheck", true);
-                st.pref(new CustomSetting(t -> t.button(Core.bundle.get("setting.checkUpdate.name"), Styles.defaultt, () -> UpdateChecker.check(true)).width(200f).padTop(6f)));
-                // 灰色细线：更新区与信号/中枢显示设置分隔（注册为设置项，rebuild 时保留）
-                st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
-                // —— 信号显示设置 ——
+
+                // —— 信号显示 ——
+                addSection(st, "setting.silicon.group.signal");
                 st.checkPref("signal.hkey.toggle", true);
                 // 数字模式 / 范围模式透明度（0~100%）
                 st.sliderPref("signal.digitAlpha", 80, 0, 100, 5,
                         i -> Core.bundle.format("setting.signal.digitAlpha.value", i));
                 st.sliderPref("signal.rangeAlpha", 45, 0, 100, 5,
                         i -> Core.bundle.format("setting.signal.rangeAlpha.value", i));
-                // —— 中枢物流调试与连线 ——
+
+                // —— 物流中枢 ——
+                addSection(st, "setting.silicon.group.hub");
                 st.checkPref("hubDebugLog", false, v -> silicon.world.blocks.distribution.ItemTransferHub.debugFlows = v);
                 st.sliderPref("hubLinkOpacity", 100, 0, 100, 5, i -> i + "%");
-                // —— 万向交叉器界面 ——
+
+                // —— 界面 ——
+                addSection(st, "setting.silicon.group.ui");
                 st.checkPref("universal-junction.newUI", false);
                 // 灰色细线：与音乐播放器设分隔（注册为设置项，rebuild 时保留）
                 st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
@@ -165,11 +195,24 @@ public class Silicon extends Mod {
                         silicon.audio.AudioTranscoder.resetProbe();
                     }).growX().height(36f).padTop(4f);
                 }));
+
+                // —— 更新 ——
+                addSection(st, "setting.silicon.group.update");
+                st.checkPref("updatecheck.autoCheck", true);
+                st.pref(new CustomSetting(t -> t.button(Core.bundle.get("setting.checkUpdate.name"), Styles.defaultt, () -> UpdateChecker.check(true)).width(200f).padTop(6f)));
+
                 // 灰色细线：与「恢复默认设置」分隔（注册为设置项，rebuild 时保留）
                 st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
 
                 SiliconLog.info("Loading settings.");
             });
+        });
+
+        Events.on(EventType.ClientLoadEvent.class, e -> {
+            // 初始化常驻左边缘的消息面板，加入 HUD 组
+            messagePanel = new MessagePanel();
+            MessagePanel.setInstance(messagePanel);
+            ui.hudGroup.addChild(messagePanel);
         });
 
         Events.on(EventType.ClientLoadEvent.class, e -> {
@@ -249,6 +292,16 @@ public class Silicon extends Mod {
             String msg = e.message;
             if (msg == null || !msg.startsWith("!pause")) return;
             handlePauseCommand(e.player, msg);
+        });
+
+        // —— 消息面板开关按键 ——
+        // 默认 I 键切换面板展开/收起（可在按键设置中重绑定，仅游戏内生效）
+        Events.run(EventType.Trigger.update, () -> {
+            if (!state.isGame()) return;
+            if (messagePanel != null && keyToggleMessagePanel != null
+                && Core.input.keyTap(keyToggleMessagePanel)) {
+                messagePanel.toggle();
+            }
         });
     }
 
@@ -345,5 +398,17 @@ public class Silicon extends Mod {
                 Call.infoMessage(p.con, "[accent]Whitelist: " + list);
                 break;
         }
+    }
+
+    /**
+     * 在设置表中插入一个「分类标题」：上方灰色分隔横线 + 强调色分类名（左对齐）。
+     * 注册为设置项，rebuild（恢复默认/切换分类）时自动保留。
+     */
+    private static void addSection(SettingsMenuDialog.SettingsTable st, String labelKey) {
+        st.pref(new CustomSetting(t -> {
+            t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(2f);
+            t.row();
+            t.add(Core.bundle.get(labelKey)).color(Pal.accent).fontScale(1.1f).padTop(2f).padBottom(4f).left();
+        }));
     }
 }
