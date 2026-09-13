@@ -1231,8 +1231,10 @@ public class MusicPlayer {
             // SoundControl 只 setPaused(soundBus)，音乐挂 musicBus 即可在暂停菜单下继续发声，
             // 实现「音乐完全独立于游戏暂停」（需求 Fix 9）。
             int id = snd.play(effectiveVolume(), pitch * speed, 0f, false, false, Core.audio.musicBus);
+            int musicVol = Core.settings.getInt("musicvol", -1);
             Log.info("[Music] voice started id=" + id + " len=" + snd.getLength() + "s file=" + file.name()
-                    + " volume=" + effectiveVolume() + " bus=music");
+                    + " volume=" + effectiveVolume() + " bus=music musicvol=" + musicVol + "%"
+                    + (musicVol == 0 ? "  <== game music volume is 0, nothing audible!" : ""));
             Core.audio.setLooping(id, loopMode == LOOP_ONE);
             localVoiceId = id;
             playing = true;
