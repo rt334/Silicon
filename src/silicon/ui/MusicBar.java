@@ -9,6 +9,7 @@ import arc.graphics.g2d.ScissorStack;
 import arc.math.Mathf;
 import arc.math.geom.Rect;
 import arc.util.Align;
+import arc.util.Log;
 import arc.scene.Element;
 import arc.scene.event.InputEvent;
 import arc.scene.event.InputListener;
@@ -284,8 +285,42 @@ public class MusicBar {
             // 不再随内容 pack 伸缩导致「歌名过长不直接超出条右沿」；同时不小于内容所需的 pref 宽
             bar.setSize(Math.max(Scl.scl(EXPANDED_WIDTH), bar.getPrefWidth()), bar.getPrefHeight());
         }
+        // 兜底：无论布局算出多大的 pref，面板都不许超过屏幕。否则 clampBar 会把它推到 y=2，
+        // 条内第一行（按钮排）就被推到屏幕上方看不见 —— 表现成「整个悬浮条不见了」（实测出现过：
+        // settings 里 pos.x 被夹到最小值 3、pos.top 高达 1720，说明算出的尺寸远超屏幕）。
+        float maxW = Core.graphics.getWidth() - Scl.scl(8f);
+        float maxH = Core.graphics.getHeight() - Scl.scl(8f);
+        if (bar.getWidth() > maxW || bar.getHeight() > maxH) {
+            Log.warn("[Music] bar pref size abnormal " + bar.getWidth() + "x" + bar.getHeight()
+                    + " (screen " + Core.graphics.getWidth() + "x" + Core.graphics.getHeight()
+                    + ", scl=" + Scl.scl(1f) + ", collapsed=" + collapsed + ") -> clamped");
+            dumpBar();
+            bar.setSize(Math.min(bar.getWidth(), maxW), Math.min(bar.getHeight(), maxH));
+        }
         applyStoredPosition();
         Core.scene.root.addChild(bar);
+        Log.info("[Music] bar built collapsed=" + collapsed + " size=" + bar.getWidth() + "x" + bar.getHeight()
+                + " at=" + bar.x + "," + bar.y);
+    }
+
+    /** 诊断：把悬浮条各子元素的 pref 尺寸打进日志（仅在尺寸异常时调用），用于定位「条被撑爆」的来源 */
+    private static void dumpBar() {
+        try {
+            for (arc.scene.Element e : bar.getChildren()) {
+                Log.warn("  [bar] " + e.getClass().getSimpleName()
+                        + " pref=" + e.getPrefWidth() + "x" + e.getPrefHeight()
+                        + " size=" + e.getWidth() + "x" + e.getHeight());
+                if (e instanceof Table) {
+                    for (arc.scene.Element c : ((Table) e).getChildren()) {
+                        Log.warn("    [bar] " + c.getClass().getSimpleName()
+                                + " pref=" + c.getPrefWidth() + "x" + c.getPrefHeight()
+                                + " size=" + c.getWidth() + "x" + c.getHeight());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.warn("[SiliconMusic] bar dump failed: " + t);
+        }
     }
 
     /**
