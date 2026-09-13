@@ -107,7 +107,8 @@ public final class Mp4Demuxer {
         }
         if (esdsStart < 0) return false;
         long esdsEnd = esdsStart + esdsSize;
-        out.asc = extractAsc(raf, esdsStart + 8 + 4, esdsEnd); // 盒内容(8) + version/flags(4)
+
+        out.asc = extractAsc(raf, esdsStart + 12, esdsEnd); // 盒头(8) + version/flags(4)
         return out.asc != null && out.asc.length > 0;
     }
 
@@ -131,6 +132,7 @@ public final class Mp4Demuxer {
     /** 在 esds 的描述符链里找 DecoderSpecificInfo（tag 0x05） */
     private static byte[] extractAsc(RandomAccessFile raf, long pos, long end) throws IOException {
         while (pos < end) {
+            raf.seek(pos); // 必须显式定位：调用方的读取会移动文件指针
             int tag = raf.readUnsignedByte();
             int len = 0;
             for (int i = 0; i < 4; i++) { // 变长长度（最高位续位）
@@ -139,6 +141,7 @@ public final class Mp4Demuxer {
                 if ((b & 0x80) == 0) break;
             }
             long body = raf.getFilePointer();
+
 
             if (tag == 0x03) { // ES_Descriptor：ES_ID(2) + flags(1) [+ 可选字段]
                 raf.seek(body);
