@@ -57,18 +57,38 @@ public class InternalDecoders {
 
     /** 带解码进度（0~100，可能回调 -1 表示未知） */
     public static boolean decode(File src, File outWav, String fileName, byte[] head, java.util.function.IntConsumer onPercent) {
+        // 按顺序尝试**所有**接受该文件的解码器，而不是第一个失败就整体失败：
+        // accepts() 的判定只能靠扩展名/文件头，可能过宽（例如带 ID3 的 mp3 与 ADTS 同步字冲突），
+        // 一旦第一个接受者解不了就 return false，会把后面本来能解的解码器永久挡住。
+        String firstError = null;
         for (PcmDecoder d : DECODERS) {
             if (!d.accepts(fileName, head)) continue;
             try {
                 long frames = d.decodeToWav(src, outWav, onPercent);
-                return frames > 0;
+                if (frames > 0) {
+                    lastError = null;
+                    return true;
+                }
+                if (firstError == null) firstError = d.getClass().getSimpleName() + ": decoded 0 frames";
             } catch (Exception e) {
                 // 本包刻意不引用 arc（便于用普通 JVM 单测）；失败原因由调用方记录
-                lastError = d.getClass().getSimpleName() + ": " + e.getMessage();
-                return false;
+                String msg = d.getClass().getSimpleName() + ": " + e.getMessage();
+                if (firstError == null) firstError = msg;
+                cleanupFailedAttempt(outWav, d.getClass().getSimpleName(), e);
             }
         }
+        lastError = firstError;
         return false;
+    }
+
+    /** 单个解码器失败时把「产物清掉」，避免下一个解码器看到上一个的半成品（WavWriter 会截断，但空文件会让
+     *  AudioTranscoder 误判成功）；失败细节进日志便于排查。 */
+    private static void cleanupFailedAttempt(File outWav, String name, Exception e) {
+        try {
+            if (outWav != null && outWav.exists() && outWav.length() > 44) outWav.delete();
+        } catch (Exception ignored) {
+        }
+        System.out.println("[SiliconMusic] decoder " + name + " failed: " + e);
     }
 
     /** 上一次 decode 失败原因（供调用方记录/提示） */

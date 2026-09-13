@@ -52,8 +52,11 @@ public class AudioTranscoder {
         return t;
     });
     /** null=未探测，TRUE/FALSE=已探测 */
-    private static Boolean available;
-    private static String resolvedPath;
+    /** null=未探测，TRUE/FALSE=已探测；由探测线程写、渲染线程读，必须 volatile
+     *  （此前两个访问器都带 synchronized，而探测线程在整个探测期间持有同一把类锁 →
+     *   渲染线程调 ffmpegPath() 会被阻塞最多 ~4.5 秒，正好违反「绝不阻塞调用线程」的承诺） */
+    private static volatile Boolean available;
+    private static volatile String resolvedPath;
 
     private AudioTranscoder() {}
 
@@ -114,11 +117,11 @@ public class AudioTranscoder {
         return null; // 本次未知：调用方按「暂不可用」处理（下次即可拿到结果）
     }
 
-    private static synchronized String ffmpegPathCached() {
+    private static String ffmpegPathCached() {
         return available == null ? null : resolvedPath;
     }
 
-    private static synchronized String ffmpegPathBlocking() {
+    private static String ffmpegPathBlocking() {
         if (available != null) return resolvedPath;
         String configured = null;
         try {
@@ -225,7 +228,7 @@ public class AudioTranscoder {
                     try {
                         WavDownsampler.Result r = WavDownsampler.shrinkIfNeeded(out.file(), maxWavBytes());
                         Log.info("[Music] cached wav downsample hash=" + hash + " -> " + r.text);
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
                         Log.warn("[SiliconMusic] cached wav downsample failed: " + e);
                     }
                     progress.remove(hash);
@@ -265,7 +268,7 @@ public class AudioTranscoder {
                         done = silicon.audio.decode.InternalDecoders.decode(srcFile, tmpFile, src.name(), head,
                                 pct -> progress.put(hash, Math.max(0f, Math.min(1f, pct / 100f))));
                     }
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     Log.warn("[SiliconMusic] internal decode error: " + e.getMessage());
                 }
                 Log.info("[Music] internal decode result=" + done + " hash=" + hash);
@@ -277,6 +280,10 @@ public class AudioTranscoder {
                 if (!done) {
                     if (exe == null) throw new IllegalStateException("no decoder for this format");
                     if (tmp.exists()) tmp.delete();
+                    // 进度分母：用纯 Java 元数据探测。**不能**调 MusicPlayer.trackLengthSeconds(hash)：
+                    // 那是渲染线程的状态（tracks/lengthCache/hashExt），其中一条回退路径还会调 SoLoud 的
+                    // Music.create —— 在转码线程上用非线程安全集合 + 原生音频调用都可能出事。
+                    float ffmpegTotal = silicon.audio.decode.TrackProbe.durationSeconds(src.file());
                     ProcessBuilder pb = new ProcessBuilder(
                             exe, "-hide_banner", "-nostdin", "-v", "error", "-y",
                             "-i", src.absolutePath(),
@@ -293,19 +300,21 @@ public class AudioTranscoder {
                             if (line.startsWith("out_time_ms=")) {
                                 try {
                                     float ms = Float.parseFloat(line.substring("out_time_ms=".length()));
-                                    float total = MusicPlayer.trackLengthSeconds(hash);
-                                    progress.put(hash, total > 0f ? Math.min(1f, ms / 1000f / total) : -1f);
+                                    progress.put(hash, ffmpegTotal > 0f ? Math.min(1f, ms / 1000f / ffmpegTotal) : -1f);
                                 } catch (Exception ignored) {
                                 }
                             }
                             if (System.currentTimeMillis() > deadline) break;
                         }
                     }
-                    int code = p.waitFor();
-                    if (System.currentTimeMillis() > deadline) {
+                    // 必须带超时等待：此前是先无条件 waitFor() 再判 deadline —— 一旦 ffmpeg 卡住就把唯一的转码线程
+                    // 永久占住，之后所有转码都排在它后面（表现为「转码中」永远不动）。
+                    int code;
+                    if (!p.waitFor(TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                         p.destroyForcibly();
                         throw new IllegalStateException("timeout");
                     }
+                    code = p.exitValue();
                     if (code != 0) throw new IllegalStateException("ffmpeg exit " + code);
                 }
 
@@ -323,7 +332,7 @@ public class AudioTranscoder {
                 queued.remove(hash);
                 running.remove(hash);
                 if (onReady != null) Core.app.post(onReady);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 if (p != null && p.isAlive()) p.destroyForcibly();
                 progress.remove(hash);
                 queued.remove(hash);

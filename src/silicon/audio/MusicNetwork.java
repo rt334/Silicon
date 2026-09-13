@@ -85,6 +85,17 @@ public class MusicNetwork {
     private static final long MAX_SHARE_BYTES = 64L * 1024 * 1024;
     /** 服务端转发速率上限：单玩家 2MB/s（1 秒滑动窗口） */
     private static final long MAX_RELAY_BYTES_PER_SEC = 2L * 1024 * 1024;
+    /** 同时进行的「分块接收」上限：每个条目会分配 boolean[chunkCount]（≤4KB）并建一个 ≤64MB 的 .part 文件，
+     *  不限个数时单个客户端广播 N 个 hash 就能同时吃满内存与磁盘（.part 不参与 LRU 淘汰） */
+    private static final int MAX_CONCURRENT_RECV = 4;
+    /** 分块接收静默超时：超过该时间没有任何分块到达就丢弃状态并删除 .part（防挂死的分享长期占盘） */
+    private static final long RECV_TIMEOUT_MS = 90_000L;
+    /** 静默清理检查间隔（毫秒） */
+    private static final long RECV_SWEEP_INTERVAL_MS = 5_000L;
+    /** 单曲分享下载上限：与分块路径同一上限，防止对端给一个「超大 URL」把接收端内存打爆 */
+    private static final long MAX_DOWNLOAD_BYTES = MAX_SHARE_BYTES;
+    /** owner/坐标表的条目上限（owner 字符串由对端决定，不设上限就是无界增长） */
+    private static final int MAX_OWNER_ENTRIES = 128;
 
     /** hash 是否为合法形态（接收任何 hash 之前都必须过这一关） */
     static boolean isValidHash(String hash) {
@@ -112,8 +123,11 @@ public class MusicNetwork {
             String uuid = e.player == null ? null : e.player.uuid();
             if (uuid == null || uuid.isEmpty()) return;
             ownerPos.remove(uuid);
-            recv.remove(uuid);
-            ownerHash.remove(uuid); // 防离开玩家的在途下载/分块收齐后仍按旧挂账建立声源
+            String inFlight = ownerHash.remove(uuid); // 防离开玩家的在途下载/分块收齐后仍按旧挂账建立声源
+            if (inFlight != null) recv.remove(inFlight); // recv 按 hash 建键（此前误用 uuid，等于没清）
+            // 服务端转发层的账也要清（否则长寿命服务器上按 uuid 无界累积）
+            relayHash.remove(uuid);
+            relayQuota.remove(uuid);
             MusicPlayer.stopRemoteVoice(uuid);
         });
 
@@ -147,6 +161,10 @@ public class MusicNetwork {
             if (p == null || data == null) return;
             String key = playerKey(p);
             try {
+                // 信任边界其一：owner 必须等于发送者本人。此前原样转发客户端给的 owner，
+                // 任意客户端都能把声源挂到别人名下（冒名 + 任意坐标）。
+                String declaredOwner = extract(data, "owner");
+                if (declaredOwner == null || !declaredOwner.equals(key)) return;
                 String op = extract(data, "op");
                 String hash = extract(data, "hash");
                 if ("stop".equals(op)) {
@@ -162,6 +180,9 @@ public class MusicNetwork {
         netServer.addPacketHandler(MSG_META, (p, data) -> {
             if (p == null || data == null) return;
             try {
+                // 信任边界其二：meta 的 owner 同样必须等于发送者
+                String declaredOwner = extract(data, "owner");
+                if (declaredOwner == null || !declaredOwner.equals(playerKey(p))) return;
                 String hash = extract(data, "hash");
                 if (isValidHash(hash)) relayHash.put(playerKey(p), hash);
             } catch (Exception ignored) {
@@ -169,7 +190,15 @@ public class MusicNetwork {
             Call.clientPacketReliable(MSG_META, data);
         });
         netServer.addPacketHandler(MSG_POS, (p, data) -> {
-            if (p == null) return;
+            if (p == null || data == null) return;
+            // 信任边界其三：坐标包的 owner（"owner|hash|x|y"）必须等于发送者，
+            // 否则任意客户端都能把别人的声源坐标刷到任意位置
+            try {
+                int bar = data == null ? -1 : data.indexOf('|');
+                if (bar <= 0 || !data.substring(0, bar).equals(playerKey(p))) return;
+            } catch (Exception ignored) {
+                return;
+            }
             Call.clientPacketUnreliable(MSG_POS, data);
         });
         netServer.addBinaryPacketHandler(MSG_CHUNK, (p, bytes) -> {
@@ -481,6 +510,14 @@ public class MusicNetwork {
     }
 
     private static void downloadAndPlay(String owner, String hash, String url, String name) {
+        // 绑定校验：URL 曲目的 hash 必须等于「URL 字符串的 sha256 前 16 位」。
+        // 否则对端可以拿一个受害者也有的 hash、配上自己的 URL，让受害者把攻击者内容缓存成那个 hash
+        // （缓存投毒：受害者自己曲库里的该曲目会被换成攻击者的文件）。
+        String expect = MusicPlayer.hashOf(url);
+        if (expect == null || !expect.equalsIgnoreCase(hash)) {
+            Log.warn("[SiliconMusic] reject URL share: hash " + hash + " != hash(url) " + expect);
+            return;
+        }
         // 保证已有曲目记录（接收方本地建立一条 URL 元数据，便于缓存查找）
         if (MusicPlayer.trackByHash(hash) == null) {
             int dup = MusicPlayer.indexOfHash(hash);
@@ -571,6 +608,15 @@ public class MusicNetwork {
             String safeExt = sanitizeExt(ext);
             if (safeExt != null) MusicPlayer.registerHashExt(hash, safeExt);
             if (MusicPlayer.hasCache(hash)) return; // 已有缓存，无需接收分块
+            // 不覆盖在途接收状态：否则对端只要补发一条 chunks=1 的 meta，就能让合法分享的后续分块全部
+            // 因长度不匹配被丢弃（永久卡死别人的分享）
+            if (recv.containsKey(hash)) return;
+            // 并发接收数封顶：每条会分配 boolean[chunks] 并建一个 ≤64MB 的 .part（.part 不参与 LRU 淘汰），
+            // 不封顶就能单客户端刷爆内存与磁盘
+            if (recv.size >= MAX_CONCURRENT_RECV) {
+                Log.info("[SiliconMusic] drop share " + hash + ": concurrent receive limit (" + recv.size + ")");
+                return;
+            }
             // 建接收缓冲与缓存文件（先写占位）
             ChunkRecv r = new ChunkRecv();
             r.hash = hash;
@@ -578,6 +624,7 @@ public class MusicNetwork {
             r.chunkCount = chunks;
             r.received = new boolean[chunks];
             r.total = chunks;
+            r.lastAt = System.currentTimeMillis();
             recv.put(hash, r); // 与 onChunk 统一按 hash 建键（此前按 owner，依赖线性兜底查找）
         } catch (Exception e) {
             Log.info("[SiliconMusic] onMeta err: " + e.getMessage());
@@ -763,7 +810,13 @@ public class MusicNetwork {
         int start = i + pat.length();
         int end = start;
         while (end < json.length()) {
-            if (json.charAt(end) == '"' && (end == 0 || json.charAt(end - 1) != '\\')) break;
+            if (json.charAt(end) == '"') {
+                // 统计前面连续的反斜杠个数：偶数个才是真正的结束引号（奇数个表示被转义）。
+                // 原实现只看前一个字符，值以 \ 结尾时会把后面的分隔符一起吞掉（字段串味）。
+                int bs = 0;
+                for (int k = end - 1; k >= start && json.charAt(k) == '\\'; k--) bs++;
+                if ((bs & 1) == 0) break;
+            }
             end++;
         }
         if (end >= json.length()) return null;
@@ -797,6 +850,8 @@ public class MusicNetwork {
         int receivedCount;
         /** 已接收字节数（用于单曲上限，防无限刷盘） */
         long bytes;
+        /** 最近一次收到分块的时刻（毫秒）；用于静默超时清理（.part 不参与 LRU 淘汰） */
+        long lastAt;
     }
 
     /** 是否正在下载该 hash 的 URL 曲目（供 UI 显示“下载中”） */

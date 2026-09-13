@@ -32,11 +32,13 @@ public final class AdtsDemuxer {
      * 会把 .aac 误判成 mp3（实测：时长被算成 0.036s、解码交给 jlayer 后失败）。区别在
      * {@code b1} 的 layer 位——ADTS 固定为 {@code 00}，而 MPEG 音频里 {@code 00} 是保留值，
      * 因此「layer==00 且帧长合法」不会与 mp3 冲突。
+     * <p>
+     * <b>绝不能把「以 ID3 开头」当作 ADTS 依据</b>：带 ID3v2 标签的 mp3 是常见情况，而 AacDecoder
+     * 在解码器列表里排在 Mp3Decoder 之前，一旦这里对 ID3 返回 true，这些 mp3 会被交给 jaad 解码失败
+     * （表现为「带标签的 mp3 播不了」）。带 ID3 的 .aac 由调用方按扩展名判断。
      */
     public static boolean looksLike(byte[] head) {
-        if (head == null || head.length < 3) return false;
-        if (head[0] == 'I' && head[1] == 'D' && head[2] == '3') return true; // 带 ID3v2 的 .aac
-        if (head.length < 7) return false;
+        if (head == null || head.length < 7) return false;
         if (head[0] != (byte) 0xFF || (head[1] & 0xF0) != 0xF0) return false;
         if ((head[1] & 0x06) != 0) return false; // layer 必须为 00（mp3 是 01/10）
         int freqIdx = (head[2] >> 2) & 0x0F;
@@ -64,18 +66,27 @@ public final class AdtsDemuxer {
         return a;
     }
 
-    /** 只算时长（列表显示用），不建帧表 */
+    /** 只算时长（列表显示用），不建帧表。
+     *  时长探测跑在渲染线程上（列表每次重建都会问每首曲目），因此大文件不整文件扫描：
+     *  先扫前 {@link #TIME_SCAN_BYTES}，用「平均帧长」外推总帧数（ADTS 是恒定帧长流，误差极小）。 */
     public static float durationSeconds(File f) {
         if (f == null || !f.isFile()) return -1f;
         long[] first = new long[4];
         int frames;
+        long scanned;
         try {
-            frames = scan(f, null, null, first);
+            scanned = Math.min(f.length(), TIME_SCAN_BYTES);
+            frames = scan(f, null, null, first, scanned);
         } catch (Exception e) {
             return -1f;
         }
         if (frames <= 0 || first[0] <= 0) return -1f;
-        return frames * 1024f / first[0];
+        double totalFrames = frames;
+        if (f.length() > scanned && scanned > 0) {
+            // 外推：总帧数 ≈ 已扫帧数 × (文件长 / 已扫字节)。已扫字节里含帧头，比例一致，误差可忽略。
+            totalFrames = frames * (double) f.length() / (double) scanned;
+        }
+        return (float) (totalFrames * 1024.0 / first[0]);
     }
 
     /**
@@ -86,7 +97,15 @@ public final class AdtsDemuxer {
      * @param first 输出 [采样率, 声道数, ASC 高字节, ASC 低字节]（第一帧决定）
      * @return 帧数
      */
+    /** 时长探测的扫描上限：超过就只扫这一段并外推（探测在渲染线程上跑，不能整文件扫） */
+    private static final long TIME_SCAN_BYTES = 8L * 1024 * 1024;
+
     private static int scan(File f, List<Long> offs, List<Integer> sizes, long[] first) throws IOException {
+        return scan(f, offs, sizes, first, Long.MAX_VALUE);
+    }
+
+    /** @param maxBytes 最多扫描的字节数（只用于时长探测，避免大文件整扫） */
+    private static int scan(File f, List<Long> offs, List<Integer> sizes, long[] first, long maxBytes) throws IOException {
         int frames = 0;
         try (PushbackInputStream in = new PushbackInputStream(
                 new BufferedInputStream(new FileInputStream(f), 1 << 16), 10)) {

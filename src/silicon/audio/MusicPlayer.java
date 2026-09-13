@@ -210,7 +210,9 @@ public class MusicPlayer {
             int removed = 0;
             for (Fi f : files) {
                 if (files.size - removed <= CACHE_MAX_FILES && total <= CACHE_MAX_BYTES) break;
-                // 源缓存：仍被曲目引用的不动；转码产物（wav/）是派生文件，按 LRU 删（代价只是重新解码）`n                boolean isTranscode = "wav".equalsIgnoreCase(f.parent() == null ? "" : f.parent().name());`n                if (!isTranscode && isReferenced(f.nameWithoutExtension())) continue;
+                // 源缓存：仍被曲目引用的不动；转码产物（wav/）是派生文件，按 LRU 删（代价只是重新解码）
+                boolean isTranscode = "wav".equalsIgnoreCase(f.parent() == null ? "" : f.parent().name());
+                if (!isTranscode && isReferenced(f.nameWithoutExtension())) continue;
                 long len = f.length();
                 if (f.delete()) {
                     total -= len;
@@ -476,7 +478,15 @@ public class MusicPlayer {
                     for (MusicTrack t : arr) if (t != null && t.cacheHash != null) tracks.add(t);
                 }
             } catch (Exception e) {
+                // 解析失败**绝不能**让「空列表」覆盖掉用户曲库：ensureInternalTracks() 紧接着就会 saveTracks()，
+                // 一旦这里只 clear()，用户整个曲目库（含本地曲目与专辑归属）就被静默清空且无法恢复。
+                // 这里把原始值备份到单独键并记日志，留给用户/后续版本手工恢复。
                 tracks.clear();
+                try {
+                    Core.settings.put("musicplayer.tracks.broken", raw);
+                } catch (Exception ignored) {
+                }
+                SiliconLog.log("Track list parse failed, raw value backed up to musicplayer.tracks.broken: " + e.getMessage());
             }
         }
     }
@@ -1159,6 +1169,13 @@ public class MusicPlayer {
         return t;
     }
 
+    /** 来源字符串（URL/路径）对应的缓存 hash：SHA-256 前 16 位十六进制。
+     *  对端分享 URL 曲目时用它做绑定校验（防缓存投毒）。 */
+    public static String hashOf(String source) {
+        if (source == null || source.isEmpty()) return null;
+        return Strings.bytesToHex(sha256(source)).substring(0, 16);
+    }
+
     /** SHA-256 摘要（16 字节 → 32 hex 字符）供缓存 hash 使用 */
     private static byte[] sha256(String src) {
         try {
@@ -1273,6 +1290,17 @@ public class MusicPlayer {
                 Log.info("[Music] play idx=" + index + " name=" + t.name + " hash=" + t.cacheHash
                         + " src=" + file.name() + " cachedWav=" + (wav != null));
                 if (wav != null) {
+                    // 旧缓存里超过上限的长曲 WAV：先让转码器在原地压回预算内再播。
+                    // （转码器里那段「已有缓存 → 降采样」的逻辑此前不可达：调用方只在 transcodedWav()==null
+                    //   时才 request()，条件正好与之互斥，于是 449MB/246MB 这类老缓存永远不会被压。）
+                    if (wav.length() > AudioTranscoder.maxWavBytes() && !isHashInUse(t.cacheHash)) {
+                        Log.info("[Music] cached wav over limit, shrinking before playback: " + wav.name());
+                        final int target0 = index;
+                        AudioTranscoder.request(file, t.cacheHash, () -> {
+                            if (current == target0 && !playing) beginPlayback(target0);
+                        }, null);
+                        return;
+                    }
                     file = wav;
                 } else if (AudioTranscoder.canHandle(file)) {
                     final int target = index;
@@ -1296,7 +1324,8 @@ public class MusicPlayer {
                             toast("musicplayer.transcodeFail", t.name);
                             return;
                         }
-                        if (current == target && !playing) {
+                        // 起播前用户若已按暂停（转码期间点暂停是允许的），不要再自动开声
+                        if (current == target && !playing && !pausedByUser) {
                             beginPlayback(target);
                             if (playing) bcast("play");
                         }
@@ -1304,9 +1333,14 @@ public class MusicPlayer {
                         Log.warn("[Music] transcode failed hash=" + hash + " : " + msg);
                         transcodeFailed.add(hash);
                         if (isNativePlayable(srcFile.absolutePath())) {
-                            // 内置解码失败但 SoLoud 能放（mp3/ogg/wav）→ 退回原生播放（拖动精度次之，先能听）
+                            // 内置解码失败但 SoLoud 能放（mp3/ogg/wav）→ 退回原生播放（拖动精度次之，先能听）。
+                            // 必须与成功路径同一套陈旧性守卫：用户中途换曲/删曲后，迟到的失败回调不能把播放拉回旧曲目
+                            // （target 越界时 beginPlayback 里的 tracks.get(index) 会抛 IndexOutOfBounds）。
                             Log.info("[Music] fallback to native playback for " + srcFile.name());
-                            beginPlayback(target);
+                            if (current == target && !playing && !pausedByUser) {
+                                beginPlayback(target);
+                                if (playing) bcast("play");
+                            }
                         } else {
                             toast("musicplayer.transcodeFail", t.name);
                         }
@@ -1442,7 +1476,16 @@ public class MusicPlayer {
     }
 
     public static void pause() {
-        if (!playing) return;
+        // 起播阶段（转码/解封装中）UI 已经把按钮画成暂停，此时也必须能「暂停」：
+        // 原先直接 return，而点击方是 if (isPlaying()) pause(); else resume(); —— 结果是这一下反而又触发 resume()。
+        if (!playing) {
+            if (isStarting()) {
+                pausedByUser = true;
+                wasPlayingBeforePause = true;
+                Log.info("[Music] pause requested during start (will not auto-play when ready)");
+            }
+            return;
+        }
         // 记录「暂停前确实在播放」，供 resume 延长慢速外部声源的加载确认窗口
         wasPlayingBeforePause = true;
         if (localVoiceId >= 0) pausedPosition = currentTime();
@@ -2264,6 +2307,9 @@ public class MusicPlayer {
                 out.write(data);
             }
             hashExt.put(hash, e);
+            // 写完立即按预算淘汰：此前 enforceCacheBudget() 只在「分块收齐」路径调用，
+            // URL 下载这条主要的增长来源完全不受 512MB/512 文件预算约束（对端可控 → 磁盘可被刷满）。
+            enforceCacheBudget();
             return true;
         } catch (Exception e) {
             SiliconLog.log("Cache write fail " + hash + ": " + e.getMessage());
@@ -2384,7 +2430,8 @@ public class MusicPlayer {
             Fi wav = transcodedWav(hash);
             if (wav != null) {
                 file = wav;
-            } else if (needsTranscode(file) && AudioTranscoder.canHandle(file)) {
+            } else if (needsTranscode(file) && AudioTranscoder.canHandle(file)
+                    && !transcodeFailed.contains(hash)) { // 与本地路径同一道闸：已确认失败的别再反复请求
                 if (!AudioTranscoder.isTranscoding(hash)) {
                     final String rh = hash;
                     final float ox = ownerX;
@@ -2393,12 +2440,12 @@ public class MusicPlayer {
                 }
                 return;
             }
-            // 转码已确认失败：对 flac 这类 SoLoud 根本不能播的格式，别再掉进全量加载（会白读整个文件再报错）
-            if (transcodeFailed.contains(t.cacheHash) && !isNativePlayable(file.absolutePath())) {
-                Log.warn("[Music] transcode failed earlier, skip Soloud playback for " + file.name());
-                playing = false;
-                localVoiceId = -1;
-                toast("musicplayer.transcodeFail", t.name);
+            // 转码已确认失败：对 flac 这类 SoLoud 根本不能播的格式，别再掉进全量加载（会白读整个文件再报错）。
+            // 注意这条路径上 t（本地曲目记录）**合法地为 null**（上面注释就写了「无本地记录，用缓存放」），
+            // 所以判断必须用 hash 而不是 t.cacheHash，并且**绝不能**动本地播放状态
+            // （原先照抄本地分支的 playing=false/localVoiceId=-1，会把正在播的本地声源变成无法停止的孤儿）。
+            if (transcodeFailed.contains(hash) && !isNativePlayable(file.absolutePath())) {
+                Log.warn("[Music] remote: transcode failed earlier, skip Soloud playback for " + file.name());
                 return;
             }
             if (!isDecodablePath(file.absolutePath())) {
@@ -2413,6 +2460,16 @@ public class MusicPlayer {
             v.sound = snd;
             float vol = (player == null) ? effectiveVolume() : calcListenVolume(ownerX - player.x, ownerY - player.y);
             int id = snd.play(vol, 1f, 0f, false, false, Core.audio.musicBus);
+            // 与本地路径一致：soloud 建源失败返回 -1 时不能再把 -1 交给后续 setLooping/setVolume
+            // （arc 的 Audio.set* 不校验 id，直接透传给 native），也不能留下 voiceId=-1 的僵尸 Voice
+            if (id < 0) {
+                SiliconLog.log("Remote soloud play returned -1: " + file.name());
+                try {
+                    snd.dispose();
+                } catch (Exception ignored) {
+                }
+                return;
+            }
             v.voiceId = id;
             Core.audio.setLooping(id, false);
             v.lastX = ownerX;
