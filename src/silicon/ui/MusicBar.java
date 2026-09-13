@@ -73,6 +73,11 @@ public class MusicBar {
             // 仅在游戏中且有玩家实体时显示（避免主菜单 player==null 时误播 NPE）
             if (!mindustry.Vars.state.isGame() || mindustry.Vars.player == null || !MusicPlayer.isEnabled()) {
                 if (bar != null) {
+                    // 记录被挡掉的原因：总开关关掉时悬浮条会整体消失（音乐却照常播放），
+                    // 用户只会看到「条不见了」，非常难排查——写进诊断文件（含是否因为在游戏中/有没有玩家）
+                    diag("bar hidden: isGame=" + mindustry.Vars.state.isGame()
+                            + " player=" + (mindustry.Vars.player != null)
+                            + " enabled=" + MusicPlayer.isEnabled());
                     bar.remove();
                     bar = null;
                 }
@@ -239,7 +244,7 @@ public class MusicBar {
             collapseBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("收起")));
             controls.add(collapseBtn).size(Scl.scl(32f)).pad(1f);
 
-            bar.add(controls).growX().padBottom(2f);
+            bar.add(controls).growX().height(Scl.scl(40f)).padBottom(2f);
             bar.row();
             // 曲名 + 当前/总时长：内嵌横向 Table，growX 铺满整条固定宽度 → 长曲名在条内滚动裁剪、不拉长整条
             Table infoRow = new Table();
@@ -281,45 +286,61 @@ public class MusicBar {
 
         bar.pack();
         if (!collapsed) {
-            // 展开态固定整条宽度：曲名/进度行以 growX 铺满，长曲名在此固定宽内滚动裁剪，
-            // 不再随内容 pack 伸缩导致「歌名过长不直接超出条右沿」；同时不小于内容所需的 pref 宽
-            bar.setSize(Math.max(Scl.scl(EXPANDED_WIDTH), bar.getPrefWidth()), bar.getPrefHeight());
+            // 展开态用**固定宽度**（600 Scl）：三行都是 growX，宽度不需要问内容要。
+            // 关键修复：原先写的是 Math.max(Scl.scl(600f), bar.getPrefWidth())，只要哪个子元素的 pref
+            // 被算成异常大值，条就会宽到超过屏幕 → clampBar 把 x 顶到最小值、条体大部分在屏幕外
+            // （实测 settings 里 pos.x=3、pos.top=1720）。三行的高度现在也都显式固定
+            // （按钮排 40 / 曲名行 44 / 进度条 24），因此 pref 高度同样是确定的，不会再被撑高。
+            bar.setSize(Scl.scl(EXPANDED_WIDTH), bar.getPrefHeight());
         }
         // 兜底：无论布局算出多大的 pref，面板都不许超过屏幕。否则 clampBar 会把它推到 y=2，
         // 条内第一行（按钮排）就被推到屏幕上方看不见 —— 表现成「整个悬浮条不见了」（实测出现过：
         // settings 里 pos.x 被夹到最小值 3、pos.top 高达 1720，说明算出的尺寸远超屏幕）。
         float maxW = Core.graphics.getWidth() - Scl.scl(8f);
         float maxH = Core.graphics.getHeight() - Scl.scl(8f);
-        if (bar.getWidth() > maxW || bar.getHeight() > maxH) {
-            Log.warn("[Music] bar pref size abnormal " + bar.getWidth() + "x" + bar.getHeight()
-                    + " (screen " + Core.graphics.getWidth() + "x" + Core.graphics.getHeight()
-                    + ", scl=" + Scl.scl(1f) + ", collapsed=" + collapsed + ") -> clamped");
-            dumpBar();
+        boolean abnormal = bar.getWidth() > maxW || bar.getHeight() > maxH;
+        if (abnormal) {
             bar.setSize(Math.min(bar.getWidth(), maxW), Math.min(bar.getHeight(), maxH));
         }
         applyStoredPosition();
         Core.scene.root.addChild(bar);
-        Log.info("[Music] bar built collapsed=" + collapsed + " size=" + bar.getWidth() + "x" + bar.getHeight()
-                + " at=" + bar.x + "," + bar.y);
+        // 诊断：悬浮条布局参数写入独立追加文件（last_log.txt 每次启动都被覆盖，会冲掉现场证据）
+        diag("build collapsed=" + collapsed + " abnormal=" + abnormal
+                + " pref=" + bar.getPrefWidth() + "x" + bar.getPrefHeight()
+                + " size=" + bar.getWidth() + "x" + bar.getHeight()
+                + " at=" + bar.x + "," + bar.y
+                + " screen=" + Core.graphics.getWidth() + "x" + Core.graphics.getHeight()
+                + " scl=" + Scl.scl(1f)
+                + " cfgX=" + Core.settings.getFloat(CFG_X, -1f) + " cfgTop=" + Core.settings.getFloat(CFG_TOP, -1f));
+        diagBar();
     }
 
-    /** 诊断：把悬浮条各子元素的 pref 尺寸打进日志（仅在尺寸异常时调用），用于定位「条被撑爆」的来源 */
-    private static void dumpBar() {
+    /** 诊断输出：同时进日志与 {@code silicon-musicbar.log}（追加，不会被下次启动覆盖） */
+    private static void diag(String msg) {
+        Log.info("[Music] bar " + msg);
+        try {
+            Core.files.local("silicon-musicbar.log").writeString(msg + "\n", true);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 诊断：逐个子元素记录 pref/size（两层），用于定位是谁把悬浮条撑爆的 */
+    private static void diagBar() {
         try {
             for (arc.scene.Element e : bar.getChildren()) {
-                Log.warn("  [bar] " + e.getClass().getSimpleName()
+                diag("  child " + e.getClass().getSimpleName()
                         + " pref=" + e.getPrefWidth() + "x" + e.getPrefHeight()
                         + " size=" + e.getWidth() + "x" + e.getHeight());
                 if (e instanceof Table) {
                     for (arc.scene.Element c : ((Table) e).getChildren()) {
-                        Log.warn("    [bar] " + c.getClass().getSimpleName()
+                        diag("    child " + c.getClass().getSimpleName()
                                 + " pref=" + c.getPrefWidth() + "x" + c.getPrefHeight()
                                 + " size=" + c.getWidth() + "x" + c.getHeight());
                     }
                 }
             }
         } catch (Throwable t) {
-            Log.warn("[SiliconMusic] bar dump failed: " + t);
+            diag("  dump failed: " + t);
         }
     }
 
