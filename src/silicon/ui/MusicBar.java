@@ -44,6 +44,8 @@ public class MusicBar {
     private static final float BAR_MARGIN = 4f;
     /** 收起态按钮边长（Scl 单位）——面板尺寸必须 = 按钮 + 两侧 margin，否则按钮会溢出面板背景 */
     private static final float COLLAPSED_BTN = 40f;
+    /** 文字按钮统一高度（Scl 单位）：与弹窗内的 BTN_H 一致，避免同一套 UI 里按钮高矮不一 */
+    private static final float TEXT_BTN_H = 34f;
     /** 展开态面板宽度（Scl 单位）：曲名/进度行以 growX 铺满，长曲名在固定宽内滚动裁剪 */
     private static final float EXPANDED_WIDTH = 600f;
     /** 默认位置：贴左边缘（Scl 单位） */
@@ -93,8 +95,10 @@ public class MusicBar {
             ImageButton btn = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.cleari);
             btn.resizeImage(Scl.scl(26f));
             btn.update(() -> {
-                btn.getImage().setDrawable(MusicPlayer.isPlaying() ? Icon.pause : Icon.play);
-                btn.getImage().setColor(MusicPlayer.isPlaying() ? Pal.accent : Color.white);
+                boolean p = MusicPlayer.isPlaying();
+                boolean starting = !p && MusicPlayer.isStarting();
+                btn.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
+                btn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
             });
             btn.addListener(new Tooltip(t -> {
                 String cur = MusicPlayer.currentTrack() == null ? "none" : MusicPlayer.currentTrack().name;
@@ -180,7 +184,7 @@ public class MusicBar {
                 MusicPlayer.setSpeed(next);
                 speedBtn.setText(speedLabel());
             });
-            controls.add(speedBtn).width(Scl.scl(76f)).height(Scl.scl(30f)).pad(1f);
+            controls.add(speedBtn).width(Scl.scl(76f)).height(Scl.scl(TEXT_BTN_H)).pad(1f);
 
             // 专辑作用域切换按钮：点按在「全部曲目」与各专辑间轮换；长按/双击由设置页管理
             TextButton albumBtn = new TextButton(albumScopeLabel(), Styles.flatBordert);
@@ -198,7 +202,7 @@ public class MusicBar {
                 lastScope[0] = albumScopeLabel();
                 albumBtn.setText(lastScope[0]);
             });
-            controls.add(albumBtn).width(Scl.scl(112f)).height(Scl.scl(30f)).pad(1f);
+            controls.add(albumBtn).width(Scl.scl(112f)).height(Scl.scl(TEXT_BTN_H)).pad(1f);
 
             // 循环模式快捷按钮：点击在 6 种模式间循环。固定宽度（不等长文本切换不导致按钮忽大忽小/点小/换行），
             // 文案已改为等长的两字中文（关闭/列表/单曲/乱序/单停/随机），配合字号在固定格内完整显示不省略
@@ -217,7 +221,7 @@ public class MusicBar {
                 lastLoop[0] = loopModeLabel();
                 loopBtn.setText(lastLoop[0]);
             });
-            controls.add(loopBtn).width(Scl.scl(64f)).height(Scl.scl(30f)).pad(1f);
+            controls.add(loopBtn).width(Scl.scl(64f)).height(Scl.scl(TEXT_BTN_H)).pad(1f);
 
             // 设置按钮：打开音乐播放器设置页
             ImageButton settingsBtn = new ImageButton(Icon.settings, Styles.cleari);
@@ -252,7 +256,7 @@ public class MusicBar {
             infoRow.add(track).growX().left();
             final arc.scene.ui.Label timeLbl = new arc.scene.ui.Label("0:00 / 0:00", Styles.outlineLabel);
             timeLbl.setColor(Color.white);
-            timeLbl.setFontScale(Scl.scl(0.75f));
+            // 字号与曲名标签/按钮一致（此前单独 0.75 显得比旁边小）
             timeLbl.update(() -> {
                 float len = MusicPlayer.trackLength();
                 float cur;
@@ -318,12 +322,15 @@ public class MusicBar {
         return parent.add(b).size(Scl.scl(32f));
     }
 
-    /** 同步播放/暂停按钮图标颜色到当前 isPlaying 状态（悬浮窗停止/开始按钮切换修复） */
+    /** 同步播放/暂停按钮图标颜色到当前 isPlaying 状态（悬浮窗停止/开始按钮切换修复）。
+     *  另加「启动中」态：转码/解封装期间 isPlaying 仍为 false，若只按 isPlaying 画，用户点了播放
+     *  按钮会看到图标毫无变化（长曲解码要几秒甚至几十秒）——此时画暂停图标并压暗，表示已受理、正在起播。 */
     private static void syncPlayButton(ImageButton btn) {
         boolean p = MusicPlayer.isPlaying();
+        boolean starting = !p && MusicPlayer.isStarting();
         if (btn.getImage() == null) return;
-        btn.getImage().setDrawable(p ? Icon.pause : Icon.play);
-        btn.getImage().setColor(p ? Pal.accent : Color.white);
+        btn.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
+        btn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
     }
 
     /** 每帧把播放态同步到按钮图标（相比只在变化时更新，能兜底一切异步建源/暂停/停止路径） */

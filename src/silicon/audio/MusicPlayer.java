@@ -1064,6 +1064,19 @@ public class MusicPlayer {
         return playing;
     }
 
+    /**
+     * 已请求播放、但声源还没就绪（正在转码/解封装/降采样）。
+     * <p>
+     * 为什么需要：{@code playing} 只在声源真正建好后才置 true，长曲解码要几秒甚至几十秒，
+     * 这段时间 UI 若只按 isPlaying 判断，用户点了播放按钮会看到图标毫无变化（以为没反应）。
+     * 因此用「未在播放 + 当前曲目正在转码」推出「启动中」，UI 据此把按钮切到暂停图标并压暗。
+     */
+    public static boolean isStarting() {
+        if (playing) return false;
+        MusicTrack t = currentTrack();
+        return t != null && AudioTranscoder.isTranscoding(t.cacheHash);
+    }
+
     public static int currentVoiceId() {
         return localVoiceId;
     }
@@ -1231,6 +1244,19 @@ public class MusicPlayer {
             // SoundControl 只 setPaused(soundBus)，音乐挂 musicBus 即可在暂停菜单下继续发声，
             // 实现「音乐完全独立于游戏暂停」（需求 Fix 9）。
             int id = snd.play(effectiveVolume(), pitch * speed, 0f, false, false, Core.audio.musicBus);
+            // soloud 建源失败会返回 -1：此前照样置 playing=true + localVoiceId=-1，UI 显示「正在播放」
+            // 而实际没有声音（要等 tick 里 isPlaying(-1) 判否、走完静默窗口才纠正）。这里直接当失败处理。
+            if (id < 0) {
+                Log.warn("[Music] soloud play() returned -1 for " + file.name());
+                try {
+                    snd.dispose();
+                } catch (Exception ignored) {
+                }
+                playing = false;
+                localVoiceId = -1;
+                toast("musicplayer.playFail", t == null ? "?" : t.name);
+                return;
+            }
             int musicVol = Core.settings.getInt("musicvol", -1);
             Log.info("[Music] voice started id=" + id + " len=" + snd.getLength() + "s file=" + file.name()
                     + " volume=" + effectiveVolume() + " bus=music musicvol=" + musicVol + "%"

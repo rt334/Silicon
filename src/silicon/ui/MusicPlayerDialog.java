@@ -75,10 +75,11 @@ public class MusicPlayerDialog extends BaseDialog {
     private void rebuild() {
         cont.clearChildren();
         cont.top();
-        // 内容区铺实体底色：defaultDialog 的背景是 Tex.windowEmpty（只画边框、中间不铺底），
-        // 各内部面板之间/之外的空白就会透出游戏画面——即「背景不能完全覆盖」。
-        // 这里按其他面板同色系铺满内容区，保证弹窗范围内不露底。
-        cont.background(Styles.grayPanel);
+        // 内容区铺底色：defaultDialog 的背景是 Tex.windowEmpty（只画边框、中间不铺底），
+        // 各内部面板之间/之外的空白会透出游戏画面——即「背景不能完全覆盖」。
+        // 用**半透明**黑（black6 = 60% 黑）铺满内容区：既盖住露底，又能透出后面的游戏画面，
+        // 与游戏里其它悬浮/弹窗面板观感一致（此前一版用的是不透明的 grayPanel）。
+        cont.background(Styles.black6);
 
         // —— 顶部「现在播放」面板（实时刷新：状态/曲名随播放变化自动更新） ——
         cont.table(now -> {
@@ -118,16 +119,20 @@ public class MusicPlayerDialog extends BaseDialog {
                 nameLbl[0].maxPref = Scl.scl(520f);
                 info.add(nameLbl[0]).growX().width(Scl.scl(520f)).height(Scl.scl(36f)).padRight(6f);
             }).growX();
-            // 每帧刷新状态与曲名（悬浮条/自动推进切换曲目时这里也跟着变）；仅内容变化时 setText 避免反复重排
+            // 每帧刷新状态与曲名（悬浮条/自动推进切换曲目时这里也跟着变）；仅内容变化时 setText 避免反复重排。
+            // 三态：播放中 / 启动中（转码解封装，按钮看着没反应的那段时间）/ 未播放
             final String[] lastNow = {""};
             now.update(() -> {
                 boolean playing = MusicPlayer.isPlaying();
-                String key = (playing ? "P" : "S") + "|" + nowPlayingLabel();
+                boolean starting = !playing && MusicPlayer.isStarting();
+                String key = (playing ? "P" : starting ? "T" : "S") + "|" + nowPlayingLabel();
                 if (key.equals(lastNow[0])) return;
                 lastNow[0] = key;
-                disc[0].setDrawable(playing ? Icon.pause : Icon.play);
+                disc[0].setDrawable(playing || starting ? Icon.pause : Icon.play);
                 disc[0].setColor(playing ? Pal.accent : Color.lightGray);
-                stateLbl[0].setText(playing ? Core.bundle.get("musicplayer.playing") : Core.bundle.get("musicplayer.play"));
+                stateLbl[0].setText(playing ? Core.bundle.get("musicplayer.playing")
+                        : starting ? Core.bundle.get("musicplayer.decoding")
+                        : Core.bundle.get("musicplayer.play"));
                 stateLbl[0].setColor(playing ? Pal.accent : Color.lightGray);
                 nameLbl[0].setText(nowPlayingLabel());
                 nameLbl[0].setColor(playing ? Color.white : Color.lightGray);
@@ -204,10 +209,13 @@ public class MusicPlayerDialog extends BaseDialog {
             // 修复（2026-09-03 rev5）：主播放/暂停按钮图标此前只在「点击 togglePlay→rebuild」时刷新，
             // 若播放态经自动推进/倒放回开头停/远端状态变化等非点击路径改变，图标会滞留旧状态。
             // 与悬浮条 playButtonFrameSync 一致，每帧同步到真实播放态，彻底根治图标滞旧。
+            // 另加「启动中」态（转码/解封装期间 isPlaying 仍 false）：画暂停图标并压暗，
+            // 否则点播放后长曲解码的几秒~几十秒内按钮毫无变化，看着像没反应。
             pp.update(() -> {
                 boolean p = MusicPlayer.isPlaying();
-                pp.getImage().setDrawable(p ? Icon.pause : Icon.play);
-                pp.getImage().setColor(p ? Pal.accent : Color.white);
+                boolean starting = !p && MusicPlayer.isStarting();
+                pp.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
+                pp.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
             });
             pp.clicked(this::togglePlay);
             ctrl.add(pp).growX().height(Scl.scl(48f)).pad(2f);
@@ -508,7 +516,8 @@ public class MusicPlayerDialog extends BaseDialog {
         } else {
             MusicPlayer.resume();
         }
-        rebuild();
+        // 不再 rebuild()：主按钮图标/「现在播放」面板都有每帧 update 同步，
+        // 整窗重建既浪费又会造成按钮短暂重排（观感像闪一下）。
     }
 
     private void rebuildRows() {

@@ -32,6 +32,12 @@ import java.util.function.Consumer;
 public class AudioTranscoder {
     /** 设置项：用户可显式指定 ffmpeg 可执行文件路径 */
     public static final String CFG_FFMPEG = "musicplayer.ffmpeg";
+    /** 设置项：单曲 WAV 体积上限（MB）。超过就降采样，把长曲目压回缓存预算内 */
+    public static final String CFG_MAX_WAV_MB = "musicplayer.maxwavmb";
+    /** 上限默认值与滑杆范围（MB） */
+    public static final int DEFAULT_MAX_WAV_MB = (int) (WavDownsampler.MAX_BYTES / 1048576L);
+    public static final int MIN_MAX_WAV_MB = 64;
+    public static final int MAX_MAX_WAV_MB = 512;
     /** 单次转码超时（毫秒） */
     private static final long TIMEOUT_MS = 5 * 60 * 1000L;
     /** 正在转码的 hash → 进度(0..1)，未知为 -1 */
@@ -50,6 +56,23 @@ public class AudioTranscoder {
     private static String resolvedPath;
 
     private AudioTranscoder() {}
+
+    /**
+     * 当前生效的单曲 WAV 体积上限（字节）：读设置并夹取在 [{@link #MIN_MAX_WAV_MB}, {@link #MAX_MAX_WAV_MB}] MB。
+     * <p>
+     * 这是「超长曲目降采样」的阈值：PCM 体积 = 秒 × 采样率 × 声道 × 2，比如 44 分钟的 44.1k 立体声是 471MB，
+     * 缓存预算只有 512MB，两首长曲就会把别的曲目挤出去。用户可在设置里用滑杆调（默认 160MB）。
+     */
+    public static long maxWavBytes() {
+        int mb = DEFAULT_MAX_WAV_MB;
+        try {
+            mb = Core.settings.getInt(CFG_MAX_WAV_MB, DEFAULT_MAX_WAV_MB);
+        } catch (Exception ignored) {
+        }
+        if (mb < MIN_MAX_WAV_MB) mb = MIN_MAX_WAV_MB;
+        if (mb > MAX_MAX_WAV_MB) mb = MAX_MAX_WAV_MB;
+        return mb * 1024L * 1024L;
+    }
 
     /** 是否正在转码该 hash（供 UI 显示「转码中」） */
     public static boolean isTranscoding(String hash) {
@@ -198,11 +221,11 @@ public class AudioTranscoder {
             silicon.audio.MusicTrack cur = MusicPlayer.currentTrack();
             boolean inUse = MusicPlayer.isPlaying() && MusicPlayer.currentVoiceId() >= 0
                     && cur != null && hash.equalsIgnoreCase(cur.cacheHash);
-            if (!inUse && out.length() > WavDownsampler.MAX_BYTES && queued.putIfAbsent(hash, Boolean.TRUE) == null) {
+            if (!inUse && out.length() > maxWavBytes() && queued.putIfAbsent(hash, Boolean.TRUE) == null) {
                 progress.put(hash, -1f);
                 pool.submit(() -> {
                     try {
-                        WavDownsampler.Result r = WavDownsampler.shrinkIfNeeded(out.file(), WavDownsampler.MAX_BYTES);
+                        WavDownsampler.Result r = WavDownsampler.shrinkIfNeeded(out.file(), maxWavBytes());
                         Log.info("[Music] cached wav downsample hash=" + hash + " -> " + r.text);
                     } catch (Exception e) {
                         Log.warn("[SiliconMusic] cached wav downsample failed: " + e);
@@ -291,7 +314,7 @@ public class AudioTranscoder {
                 if (!tmp.exists() || tmp.length() <= 44) throw new IllegalStateException("empty output");
                 // 超长曲目降采样：PCM 体积 = 秒 × 采样率 × 声道 × 2，44 分钟的 44.1k 立体声有 471MB，
                 // 会长期占满 512MB 缓存预算（把别的曲目挤出去）。超过上限就按 WavDownsampler 的策略压回来。
-                WavDownsampler.Result shrink = WavDownsampler.shrinkIfNeeded(tmp.file(), WavDownsampler.MAX_BYTES);
+                WavDownsampler.Result shrink = WavDownsampler.shrinkIfNeeded(tmp.file(), maxWavBytes());
                 if (shrink.changed) {
                     Log.info("[Music] long track downsample hash=" + hash + " " + shrink.text);
                 }
