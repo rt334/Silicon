@@ -113,17 +113,15 @@ public class MusicBar {
                 String cur = MusicPlayer.currentTrack() == null ? "none" : MusicPlayer.currentTrack().name;
                 t.background(Styles.black6).margin(4f).add(cur.replace("[", "[[").replace("]", "]]"));
             }));
-            bar.add(btn).size(Scl.scl(COLLAPSED_BTN));
+            bar.add(btn).size(COLLAPSED_BTN);
             makeDraggable(btn, () -> {
                 collapsed = false;
                 Core.settings.put(CFG_COLLAPSED, false);
                 detach();
             });
             bar.pack();
-            // 正方形面板：尺寸 = 按钮 + 两侧 margin。旧实现固定 44f（= 按钮边长），按钮比面板大 8f，
-            // 于是图标/按钮背景从面板四边各溢出 4f——「收起后背景不正常」。
-            float side = Scl.scl(COLLAPSED_BTN) + BAR_MARGIN * 2f;
-            bar.setSize(side, side);
+            // 尺寸交给 pack() 决定：Cell.size 与 Table.margin 内部各自乘一次 Scl，手算面板边长容易单位写错，
+            // 而且这里原本 setSize 之后又在展开/收起共用段被 pack() 覆盖，属于死代码。
         } else {
             // 展开态：整条 = 单列三行（按钮排 / 曲名+时间 / 进度条）。
             // 关键：每行都必须自己铺满整条宽度。旧实现把 11 个按钮直接排成 11 列，
@@ -134,19 +132,19 @@ public class MusicBar {
             ImageButton grip = new ImageButton(Icon.move, Styles.flati);
             grip.resizeImage(Scl.scl(20f));
             grip.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("拖动移动")) );
-            controls.add(grip).size(Scl.scl(32f)).pad(1f);
+            controls.add(grip).size(32f).pad(1f);
             makeDraggable(grip);
             ImageButton prevBtn = new ImageButton(Icon.leftOpen, Styles.cleari);
             prevBtn.resizeImage(Scl.scl(18f));
             prevBtn.clicked(MusicPlayer::prev);
             prevBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("上一曲")));
-            controls.add(prevBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(prevBtn).size(32f).pad(1f);
             // 快退（相对 -10s）
             ImageButton rewindBtn = new ImageButton(Icon.leftSmall, Styles.cleari);
             rewindBtn.resizeImage(Scl.scl(18f));
             rewindBtn.clicked(() -> MusicPlayer.seekRelative(-10f));
             rewindBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("快退10秒")));
-            controls.add(rewindBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(rewindBtn).size(32f).pad(1f);
 
             // 播放/暂停
             ImageButton play = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.flati);
@@ -160,19 +158,19 @@ public class MusicBar {
             });
             // 每帧同步图标到当前播放态（兜底异步建源/暂停/停止路径，悬浮窗停止/开始按钮切换修复）
             playButtonFrameSync(play);
-            controls.add(play).size(Scl.scl(40f)).pad(1f);
+            controls.add(play).size(40f).pad(1f);
 
             // 快进（相对 +10s）
             ImageButton forwardBtn = new ImageButton(Icon.rightSmall, Styles.cleari);
             forwardBtn.resizeImage(Scl.scl(18f));
             forwardBtn.clicked(() -> MusicPlayer.seekRelative(10f));
             forwardBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("快进10秒")));
-            controls.add(forwardBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(forwardBtn).size(32f).pad(1f);
             ImageButton nextBtn = new ImageButton(Icon.rightOpen, Styles.cleari);
             nextBtn.resizeImage(Scl.scl(18f));
             nextBtn.clicked(MusicPlayer::next);
             nextBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("下一曲")));
-            controls.add(nextBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(nextBtn).size(32f).pad(1f);
 
             // 倍速快捷循环按钮（覆盖 1/16–16x 对数档的常用子集）：0.25 / 0.5 / 1 / 1.5 / 2 / 4 / 8；固定宽度完整显示
             final float[] speeds = {0.25f, 0.5f, 1f, 1.5f, 2f, 4f, 8f};
@@ -193,7 +191,7 @@ public class MusicBar {
                 MusicPlayer.setSpeed(next);
                 speedBtn.setText(speedLabel());
             });
-            controls.add(speedBtn).width(Scl.scl(76f)).height(Scl.scl(TEXT_BTN_H)).pad(1f);
+            controls.add(speedBtn).width(76f).height(TEXT_BTN_H).pad(1f);
 
             // 专辑作用域切换按钮：点按在「全部曲目」与各专辑间轮换；长按/双击由设置页管理
             TextButton albumBtn = new TextButton(albumScopeLabel(), Styles.flatBordert);
@@ -211,7 +209,7 @@ public class MusicBar {
                 lastScope[0] = albumScopeLabel();
                 albumBtn.setText(lastScope[0]);
             });
-            controls.add(albumBtn).width(Scl.scl(112f)).height(Scl.scl(TEXT_BTN_H)).pad(1f);
+            controls.add(albumBtn).width(112f).height(TEXT_BTN_H).pad(1f);
 
             // 循环模式快捷按钮：点击在 6 种模式间循环。固定宽度（不等长文本切换不导致按钮忽大忽小/点小/换行），
             // 文案已改为等长的两字中文（关闭/列表/单曲/乱序/单停/随机），配合字号在固定格内完整显示不省略
@@ -230,29 +228,29 @@ public class MusicBar {
                 lastLoop[0] = loopModeLabel();
                 loopBtn.setText(lastLoop[0]);
             });
-            controls.add(loopBtn).width(Scl.scl(64f)).height(Scl.scl(TEXT_BTN_H)).pad(1f);
+            controls.add(loopBtn).width(64f).height(TEXT_BTN_H).pad(1f);
 
             // 设置按钮：打开音乐播放器设置页
             ImageButton settingsBtn = new ImageButton(Icon.settings, Styles.cleari);
             settingsBtn.resizeImage(Scl.scl(18f));
             settingsBtn.clicked(MusicPlayerDialog::open);
             settingsBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("设置")));
-            controls.add(settingsBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(settingsBtn).size(32f).pad(1f);
 
             // 收起（最小值化）
             ImageButton collapseBtn = new ImageButton(Icon.down, Styles.cleari);
             collapseBtn.resizeImage(Scl.scl(18f));
             collapseBtn.clicked(() -> { collapsed = true; Core.settings.put(CFG_COLLAPSED, true); detach(); });
             collapseBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("收起")));
-            controls.add(collapseBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(collapseBtn).size(32f).pad(1f);
 
             // 适配屏幕：展开条宽度 = 在「按钮排最小宽」与「600 Scl」之间取屏幕放得下的值。
             // 屏幕窄时按屏幕收窄（并让曲名可用宽跟着收窄），屏幕宽时保持 600 Scl 不变，
             // 这样大屏/小屏都不会出现「条比屏幕宽被顶到屏幕外」或「曲名行内容溢出面板」。
-            barW[0] = Math.max(controls.getPrefWidth() + BAR_MARGIN * 2f,
+            barW[0] = Math.max(controls.getPrefWidth() + Scl.scl(BAR_MARGIN) * 2f,
                     Math.min(Scl.scl(EXPANDED_WIDTH), Core.graphics.getWidth() - Scl.scl(16f)));
 
-            bar.add(controls).growX().height(Scl.scl(40f)).padBottom(2f);
+            bar.add(controls).growX().height(40f).padBottom(2f);
             bar.row();
             // 曲名 + 当前/总时长：内嵌横向 Table，growX 铺满整条固定宽度 → 长曲名在条内滚动裁剪、不拉长整条
             Table infoRow = new Table();
@@ -284,13 +282,13 @@ public class MusicBar {
                 String s = formatFloaterTime(cur, len);
                 if (!s.equals(timeLbl.getText().toString())) timeLbl.setText(s);
             });
-            infoRow.add(timeLbl).padLeft(8f).width(Scl.scl(96f)).right();
+            infoRow.add(timeLbl).padLeft(8f).width(96f).right();
             // 行高给足（44f 彻底避免上半部被裁），配合 MarqueeLabel 垂直居中
-            bar.add(infoRow).growX().pad(2f, 6f, 2f, 6f).left().height(Scl.scl(44f));
+            bar.add(infoRow).growX().pad(2f, 6f, 2f, 6f).left().height(44f);
 
             bar.row();
             // 进度条（独立一行，加高并上下留白，避免滑杆圆钮越界遮挡上方曲名/按钮文字）
-            bar.add(previewSlider).growX().height(Scl.scl(24f)).pad(3f, 6f, 3f, 6f);
+            bar.add(previewSlider).growX().height(24f).pad(3f, 6f, 3f, 6f);
         }
 
         bar.pack();
@@ -385,7 +383,7 @@ public class MusicBar {
         ImageButton b = new ImageButton(icon, Styles.cleari);
         b.resizeImage(Scl.scl(18f));
         b.clicked(action);
-        return parent.add(b).size(Scl.scl(32f));
+        return parent.add(b).size(32f);
     }
 
     /** 同步播放/暂停按钮图标颜色到当前 isPlaying 状态（悬浮窗停止/开始按钮切换修复）。

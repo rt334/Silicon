@@ -1176,6 +1176,12 @@ public class MusicPlayer {
         return Strings.bytesToHex(sha256(source)).substring(0, 16);
     }
 
+    /** 下载失败时给用户一个可见提示（主线程调用）。此前失败路径只清队列、不通知，表现为「点播放没反应」。 */
+    public static void notifyDownloadFailed(String name, String reason) {
+        Log.warn("[SiliconMusic] download failed for " + name + ": " + reason);
+        toast("musicplayer.transcodeFail", name == null ? "?" : name);
+    }
+
     /** SHA-256 摘要（16 字节 → 32 hex 字符）供缓存 hash 使用 */
     private static byte[] sha256(String src) {
         try {

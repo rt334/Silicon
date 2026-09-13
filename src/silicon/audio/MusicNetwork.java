@@ -529,7 +529,8 @@ public class MusicNetwork {
         }
         MusicPlayer.registerHashExt(hash, MusicPlayer.extensionFrom(url));
         // 同一 URL 已在下载中时仅登记回调（去重，避免并发多次 Http）；下载完成统一触发各自回调
-        downloadHash(hash, url, () -> playRemoteIfStillCurrent(owner, hash));
+        downloadHash(hash, url, () -> playRemoteIfStillCurrent(owner, hash),
+                err -> Log.warn("[SiliconMusic] URL share download failed: " + hash + " " + err));
     }
 
     /** 回调里检查 owner 是否仍在播放该 hash：避免下载完成/分块收齐时，owner 已 stop/切曲却仍建立声源 */
@@ -548,11 +549,14 @@ public class MusicNetwork {
             Core.app.post(onDone);
             return;
         }
-        downloadHash(t.cacheHash, t.source, onDone);
+        // 失败必须让用户看到（否则「点了播放永远没反应」）
+        downloadHash(t.cacheHash, t.source, onDone,
+                err -> Core.app.post(() -> MusicPlayer.notifyDownloadFailed(t.name, err)));
     }
 
-    /** 按 URL 下载到缓存并去重：同一 hash 已在下载中时只追加回调、不重复发起 Http；下载完成后统一在主线程触发所有回调。 */
-    private static void downloadHash(String hash, String url, Runnable onDone) {
+    /** 按 URL 下载到缓存并去重：同一 hash 已在下载中时只追加回调、不重复发起请求；完成后统一在主线程触发回调。
+     *  @param onFail 失败回调（主线程）：调用方必须能收到失败，否则用户点了播放会「永远没反应、也没有提示」 */
+    private static void downloadHash(String hash, String url, Runnable onDone, java.util.function.Consumer<String> onFail) {
         if (MusicPlayer.hasCache(hash)) {
             Core.app.post(onDone);
             return;
@@ -566,29 +570,117 @@ public class MusicNetwork {
         pend.add(onDone);
         pendingDownloads.put(hash, pend);
         Log.info("[SiliconMusic] downloading " + url);
-        Http.get(url, res -> {
-            byte[] bytes = res.getResult();
-            if (bytes == null || bytes.length == 0) {
-                Log.info("[SiliconMusic] download empty: " + url);
-                Core.app.post(() -> pendingDownloads.remove(hash));
-                return;
-            }
-            Core.app.post(() -> {
-                boolean ok = MusicPlayer.writeCacheBytes(hash, bytes);
-                arc.struct.Seq<Runnable> done = pendingDownloads.remove(hash);
-                if (ok) {
-                    if (done != null) {
-                        for (Runnable r : done) r.run();
+        downloadCapped(url,
+                bytes -> Core.app.post(() -> {
+                    boolean ok = MusicPlayer.writeCacheBytes(hash, bytes);
+                    arc.struct.Seq<Runnable> done = pendingDownloads.remove(hash);
+                    if (ok) {
+                        if (done != null) {
+                            for (Runnable r : done) r.run();
+                        }
+                        // 弹窗开着则刷新曲目行（时长/大小立即落位，无需重开弹窗）
+                        silicon.ui.MusicPlayerDialog.refreshIfOpen();
+                    } else {
+                        Log.warn("[SiliconMusic] cache write failed: " + url);
+                        if (onFail != null) onFail.accept("cache write failed");
                     }
-                    // 弹窗开着则刷新曲目行（时长/大小立即落位，无需重开弹窗）
-                    silicon.ui.MusicPlayerDialog.refreshIfOpen();
+                }),
+                err -> {
+                    Log.info("[SiliconMusic] download fail: " + err + " (" + url + ")");
+                    Core.app.post(() -> {
+                        pendingDownloads.remove(hash);
+                        if (onFail != null) onFail.accept(err);
+                    });
+                });
+    }
+
+    /**
+     * 流式下载并限长。
+     * <p>
+     * 为什么不用 {@code Http.get}：arc 的实现会把整个响应体读成一个 byte[]，对端只要在 mp-sync 里塞一个
+     * 「超大 URL」就能让每个开着模组的客户端 OOM。这里用 {@link java.net.HttpURLConnection} 边读边限长，
+     * 超限立即中断；并拒绝本机/内网地址字面量（防 SSRF）。全程在后台线程，回调由调用方 post 回主线程。
+     */
+    private static void downloadCapped(String url, java.util.function.Consumer<byte[]> ok, java.util.function.Consumer<String> fail) {
+        Thread t = new Thread(() -> {
+            java.net.HttpURLConnection c = null;
+            try {
+                if (!isPublicHttpUrl(url)) {
+                    fail.accept("blocked address");
+                    return;
                 }
-            });
-        }, err -> {
-            Log.info("[SiliconMusic] download fail: " + err.getMessage());
-            // 失败时清掉排队回调（切回主线程操作 pendingDownloads，避免 Http 线程与主线程并发操作 ObjectMap）
-            Core.app.post(() -> pendingDownloads.remove(hash));
-        });
+                c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                c.setConnectTimeout(8000);
+                c.setReadTimeout(15000);
+                c.setInstanceFollowRedirects(false); // 不跟随跳转：否则可借 302 绕到内网
+                c.setRequestProperty("User-Agent", "Silicon-music/1.0");
+                int code = c.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    fail.accept("HTTP " + code);
+                    return;
+                }
+                long declared = c.getContentLengthLong();
+                if (declared > MAX_DOWNLOAD_BYTES) {
+                    fail.accept("too large (" + declared + " bytes)");
+                    return;
+                }
+                try (java.io.InputStream in = c.getInputStream(); java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream()) {
+                    byte[] buf = new byte[64 * 1024];
+                    long total = 0;
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        total += n;
+                        if (total > MAX_DOWNLOAD_BYTES) {
+                            fail.accept("over size limit (" + MAX_DOWNLOAD_BYTES + " bytes)");
+                            return;
+                        }
+                        bos.write(buf, 0, n);
+                    }
+                    byte[] bytes = bos.toByteArray();
+                    if (bytes.length == 0) {
+                        fail.accept("empty response");
+                        return;
+                    }
+                    ok.accept(bytes);
+                }
+            } catch (Throwable e) {
+                fail.accept(String.valueOf(e));
+            } finally {
+                if (c != null) {
+                    try {
+                        c.disconnect();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }, "silicon-music-download");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** 只允许 http(s) 且主机不是本机/内网字面量（挡住常见 SSRF 目标；不做 DNS 解析，够用且不引入阻塞） */
+    private static boolean isPublicHttpUrl(String url) {
+        if (!isHttpUrl(url)) return false;
+        try {
+            String host = new java.net.URL(url).getHost();
+            if (host == null || host.isEmpty()) return false;
+            String h = host.toLowerCase();
+            if (h.equals("localhost") || h.endsWith(".local") || h.equals("::1") || h.equals("[::1]")) return false;
+            if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.") || h.startsWith("169.254.")) return false;
+            if (h.startsWith("172.")) {
+                int dot = h.indexOf('.', 4);
+                if (dot > 4) {
+                    try {
+                        int second = Integer.parseInt(h.substring(4, dot));
+                        if (second >= 16 && second <= 31) return false;
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static void onMeta(String data) {
