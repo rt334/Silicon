@@ -655,13 +655,96 @@ public class MusicPlayer {
     // ------------------------------------------------------------------
 
     private static void update() {
-        if (!initialized || player == null) return;
+        if (!initialized) return;
+        // 原生音乐压制要在 player==null（主菜单）时也生效：本模组音乐在主菜单里同样能播
+        tickNativeMusic();
+        if (player == null) return;
         // 注意：不再用 enabled 门控整个 update —— enabled 关时本地仍可正常播放（见 setEnabled 注释），
         // 本机声源推进/暂停/倒放/音量刷新必须始终运行；enabled 只影响网络的收发（canReceive/canShare）。
         // 音乐独立于游戏暂停（Fix 9）：声源已挂 musicBus，ESC 暂停仅暂停 soundBus 不影响音乐，
         // 故不再做 pausedByGame 冻结 —— 进度实时跟随，游戏暂停时音乐照常播放与推进。
         tickLocal();
         refreshVolumes();
+    }
+
+    // ------------------------------------------------------------------
+    // 游戏自带音乐（原生音乐）压制
+    // ------------------------------------------------------------------
+
+    /** 原生淡出时长（秒）：SoundControl.foutTime 默认 120 秒，压制时临时改小，让游戏自己的淡出快速完成 */
+    private static final float NATIVE_FADE_TIME = 1.5f;
+    /** 0=未压制 1=正在淡出（保留当前曲、让游戏自己淡出） 2=已静音（后续新曲立即停） */
+    private static int nativeState = 0;
+    private static float nativeSavedFoutTime = -1f;
+    private static float nativeLastStop = -100f;
+
+    /**
+     * 本模组音乐的「活跃」判定：正在播放 / 正在起播（转码） / 暂停中。
+     * 暂停也算活跃——用户只是暂停，没停播，此时不该把游戏自带音乐放回来。
+     */
+    public static boolean isAudioActive() {
+        return playing || isStarting() || pausedPosition > 0f;
+    }
+
+    /**
+     * 播放本模组音乐期间，让游戏自带音乐**淡出并保持静音**；本模组停播后立刻放开，
+     * 并让游戏自己挑一首从头播（不保存/恢复原生音乐的进度——用户明确不需要）。
+     * <p>
+     * 实现要点（v160 的 {@code mindustry.audio.SoundControl}）：
+     * <ul>
+     *   <li>它没有公开的「淡出」入口（{@code silence()} 是 protected），而 {@code stop()} 是硬停；
+     *       但游戏内 {@code update()} 每帧都会调 {@code silence()}，所以只要把它公开的
+     *       {@code foutTime}（淡出时长）从 120 秒临时压到 1.5 秒，游戏自己就会在 1.5 秒内淡出并停。</li>
+     *   <li>淡出完成后 {@code getCurrent()==null} 且内部 {@code silenced=true}；此后它仍可能按
+     *       间隔/概率 {@code playRandom()} 挑新曲（{@code playOnce} 不检查 silenced），所以进入
+     *       「已静音」态后定期补 {@code stop()}。新曲的淡入时长同样是 120 秒（音量≈0），
+     *       所以这里的定期停不会产生可听到的断续。</li>
+     *   <li>放开时恢复 {@code foutTime}；游戏内额外调一次 {@code playRandom()} 让它立刻回来
+     *       （否则要等它 3 分钟的间隔与概率判定），主菜单则由游戏自己恢复菜单曲。</li>
+     * </ul>
+     */
+    private static void tickNativeMusic() {
+        try {
+            mindustry.audio.SoundControl sc = mindustry.Vars.control == null ? null : mindustry.Vars.control.sound;
+            if (sc == null) return;
+            boolean active = isAudioActive();
+
+            if (!active) {
+                if (nativeState != 0) {
+                    nativeState = 0;
+                    if (nativeSavedFoutTime > 0f) {
+                        sc.foutTime = nativeSavedFoutTime;
+                        nativeSavedFoutTime = -1f;
+                    }
+                    Log.info("[Music] native music released");
+                    // 游戏内且规则未禁用音乐 → 立刻挑一首（从头播，不恢复进度）
+                    if (mindustry.Vars.state.isGame() && !mindustry.Vars.state.rules.disableMusic
+                            && sc.getCurrent() == null && Core.settings.getInt("musicvol", 100) > 0) {
+                        sc.playRandom();
+                    }
+                }
+                return;
+            }
+
+            if (nativeState == 0) {
+                nativeState = sc.getCurrent() == null ? 2 : 1;
+                nativeSavedFoutTime = sc.foutTime;
+                sc.foutTime = NATIVE_FADE_TIME;
+                Log.info("[Music] native music suppressed (fout=" + nativeSavedFoutTime + " -> " + NATIVE_FADE_TIME
+                        + ", current=" + (sc.getCurrent() == null ? "none" : "playing") + ")");
+            } else if (nativeState == 1) {
+                // 游戏自己在 update() 里淡出，current 归空即淡出完成
+                if (sc.getCurrent() == null) nativeState = 2;
+            } else if (sc.getCurrent() != null && Time.time - nativeLastStop > 2f) {
+                // 已静音期间它又挑到新曲（playOnce 不检查 silenced）→ 停掉。新曲淡入 120 秒、音量≈0，听不出来
+                nativeLastStop = Time.time;
+                sc.stop();
+            }
+        } catch (Throwable t) {
+            // 压制失败绝不能影响本模组播放
+            if (nativeState != 0) Log.warn("[SiliconMusic] native music suppress failed: " + t);
+            nativeState = 0;
+        }
     }
 
     private static void tickLocal() {
