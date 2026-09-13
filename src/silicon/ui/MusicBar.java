@@ -85,9 +85,10 @@ public class MusicBar {
 
     private static void build() {
         bar = new Table();
-        // 悬浮条美观：深灰面板+外边距（grayPanel 是纯色 region，会精确铺满元素范围，
-        // 因此「背景不能完全覆盖」只可能是元素被强行设得比内容小——两处尺寸都按下文修正）
-        bar.background(Styles.grayPanel);
+        // 悬浮条背景：半透明黑（black6 = 60% 黑），既保证按钮/文字对比度、又能透出后面的游戏画面
+        // （grayPanel 是纯色 region，会精确铺满元素范围，所以「背景不能完全覆盖」只可能是元素被设得比内容小
+        //  —— 两处尺寸都按下文修正过）
+        bar.background(Styles.black6);
         bar.margin(BAR_MARGIN);
 
         if (collapsed) {
