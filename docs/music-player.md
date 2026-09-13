@@ -18,7 +18,7 @@
 - 循环模式：关闭 / 列表循环 / 单曲循环 / 随机（队列乱序不重播）/ 单曲播完即停 / 真随机（共 6 种）
 - **音乐独立于游戏暂停**：声源挂 `musicBus`，ESC 暂停（暂停 soundBus）不影响音乐，暂停菜单下照常播放与推进
 - 曲目列表管理：点击即播、移除曲目
-- 添加曲目：游戏内置 / 网络 URL / 本地文件路径（Soloud 仅内置解码 ogg/mp3/wav；flac/m4a 等允许导入与多人共享，本机不可解码播放）
+- 添加曲目：游戏内置 / 网络 URL / 本地文件路径（Soloud 仅原生解码 ogg/mp3/wav；**flac/m4a/aac/opus 由内置纯 Java 解码器转 WAV 后播放**，无需 FFmpeg；其余冷门格式可选配 FFmpeg）
 
 ## 曲目类型
 
@@ -104,9 +104,14 @@
   |---|---|---|
   | wav / ogg | SoLoud 原生播放（ogg 流式 seek 正常，直接播） | 否 |
   | **mp3 / flac** | **内置纯 Java 解码器**（JLayer / jFLAC）→ WAV | 否 |
-  | m4a / aac / opus / wma / ape… | 可选 **FFmpeg** 转 WAV（设置页填路径，或 PATH 上有 ffmpeg） | 是 |
+  | **m4a / mp4 / aac** | **自写最小 MP4 解封装**（`Mp4Demuxer`：moov→stbl 的 stsz/stsc/stco + esds→ASC）+ **jaad** 解 AAC → WAV | 否 |
+  | **opus** | **vorbis-java** 解 Ogg 封装 + **Concentus** 解 Opus → WAV | 否 |
+  | wma / ape / 其他 | 可选 **FFmpeg** 转 WAV（设置页填路径，或 PATH 上有 ffmpeg） | 是 |
+- **时长探测**（列表显示）全为纯 Java 读元数据，不解码：flac 读 STREAMINFO、mp3 小文件逐帧扫描/大文件码率估算、
+  m4a 读 `moov→mvhd` 的 timescale/duration（约 20ms）。
 - 转码产物落 `cache/music/wav/<hash>.wav`，异步执行、按 hash 去重、可取消；
   收进缓存预算（512MB / 512 文件，LRU 淘汰未被引用的文件）。
+  注意 PCM 体积：`秒 × 采样率 × 声道 × 2` 字节，44 分钟 44.1kHz 立体声约 **471MB**。
 - 缺少 FFmpeg 且格式也不在纯 Java 解码范围内时，给出明确提示（而不是此前导入后才发现不能播）。
 
 ## 联机共享的安全边界（2026-09 加固）
