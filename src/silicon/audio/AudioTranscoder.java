@@ -192,6 +192,25 @@ public class AudioTranscoder {
             return;
         }
         if (out.exists() && out.length() > 44) {
+            // 已有缓存：体积超上限的长曲先压回预算内再交给播放（旧版本缓存下来的 44 分钟 m4a 有 471MB，
+            // 会顶满 512MB 缓存预算、并整块读进 SoLoud 内存）。正在播放的那首不碰，避免重写它正在读的文件。
+            silicon.audio.MusicTrack cur = MusicPlayer.currentTrack();
+            boolean inUse = cur != null && hash.equalsIgnoreCase(cur.cacheHash);
+            if (!inUse && out.length() > WavDownsampler.MAX_BYTES && queued.putIfAbsent(hash, Boolean.TRUE) == null) {
+                progress.put(hash, -1f);
+                pool.submit(() -> {
+                    try {
+                        WavDownsampler.Result r = WavDownsampler.shrinkIfNeeded(out.file(), WavDownsampler.MAX_BYTES);
+                        Log.info("[Music] cached wav downsample hash=" + hash + " -> " + r.text);
+                    } catch (Exception e) {
+                        Log.warn("[SiliconMusic] cached wav downsample failed: " + e);
+                    }
+                    progress.remove(hash);
+                    queued.remove(hash);
+                    if (onReady != null) Core.app.post(onReady);
+                });
+                return;
+            }
             if (onReady != null) Core.app.post(onReady);
             return;
         }
@@ -268,6 +287,12 @@ public class AudioTranscoder {
                 }
 
                 if (!tmp.exists() || tmp.length() <= 44) throw new IllegalStateException("empty output");
+                // 超长曲目降采样：PCM 体积 = 秒 × 采样率 × 声道 × 2，44 分钟的 44.1k 立体声有 471MB，
+                // 既顶满缓存预算又会整块进内存。超过上限就按 WavDownsampler 的策略压回来（可能是 1/4）。
+                WavDownsampler.Result shrink = WavDownsampler.shrinkIfNeeded(tmp.file(), WavDownsampler.MAX_BYTES);
+                if (shrink.changed) {
+                    Log.info("[Music] long track downsample hash=" + hash + " " + shrink.text);
+                }
                 if (out.exists()) out.delete();
                 tmp.moveTo(out);
                 Log.info("[Music] transcode done hash=" + hash + " bytes=" + out.length());

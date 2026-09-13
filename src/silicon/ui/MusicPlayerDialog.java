@@ -29,10 +29,28 @@ import static mindustry.Vars.ui;
 public class MusicPlayerDialog extends BaseDialog {
     private static MusicPlayerDialog instance;
 
+    /** 弹窗内文字按钮的统一高度（原来各处 30/32/34/36/38/40/48 混用，同一界面上按钮大小不一） */
+    private static final float BTN_H = 34f;
+
     private Table trackTable;
     /** 当前专辑筛选（null = 全部曲目） */
     private String filterAlbum = null;
     private String filterText = "";
+
+    /**
+     * 弹窗内文字按钮的**统一格式**：flatBordert + 默认字号（不加 setFontScale）+ 关换行/省略号。
+     * <p>
+     * 之前每个按钮各写各的：循环/倒放/重置位置 单独设了 0.9 字号（文字明显比停止/添加曲目小），
+     * 高度也在 30~48 之间散落。凡「普通动作按钮」一律走这里，避免再出现同类不一致。
+     * 专辑名按钮例外：长名必须裁剪，调用后自行 setEllipsis(true)。
+     */
+    private static TextButton textBtn(String label, Runnable action) {
+        TextButton b = new TextButton(label, Styles.flatBordert);
+        b.getLabel().setWrap(false);
+        b.getLabel().setEllipsis(false);
+        if (action != null) b.clicked(action);
+        return b;
+    }
 
     public static void open() {
         if (instance == null || !instance.isShown() || instance.getScene() != Core.scene) {
@@ -204,21 +222,19 @@ public class MusicPlayerDialog extends BaseDialog {
             albumsFilter.background(Styles.grayPanel);
             albumsFilter.margin(3f, 6f, 3f, 6f);
             // 「全部曲目」按钮
-            TextButton all = new TextButton(Core.bundle.get("musicplayer.allAlbums"), Styles.flatBordert);
-            all.getLabel().setWrap(false);
+            TextButton all = textBtn(Core.bundle.get("musicplayer.allAlbums"), null);
             all.update(() -> all.setColor(filterAlbum == null ? Pal.accent : Color.lightGray));
             all.clicked(() -> { filterAlbum = null; rebuildRows(); });
-            albumsFilter.add(all).width(Scl.scl(100f)).height(Scl.scl(30f)).pad(1f);
+            albumsFilter.add(all).width(Scl.scl(100f)).height(Scl.scl(BTN_H)).pad(1f);
             Seq<MusicPlayer.Album> albums = MusicPlayer.albums();
             for (int i = 0; i < albums.size; i++) {
                 MusicPlayer.Album a = albums.get(i);
                 final String name = a.name;
-                TextButton b = new TextButton(a.name, Styles.flatBordert);
-                b.getLabel().setWrap(false);
-                b.getLabel().setEllipsis(true);
+                TextButton b = textBtn(a.name, null);
+                b.getLabel().setEllipsis(true); // 专辑名可能很长：这一处需要裁剪（唯一例外）
                 b.update(() -> b.setColor(name.equals(filterAlbum) ? Pal.accent : Color.white));
                 b.clicked(() -> { filterAlbum = name; rebuildRows(); });
-                albumsFilter.add(b).width(Scl.scl(96f)).height(Scl.scl(30f)).pad(1f);
+                albumsFilter.add(b).width(Scl.scl(96f)).height(Scl.scl(BTN_H)).pad(1f);
             }
             // 新专辑按钮
             albumsFilter.add().growX();
@@ -310,58 +326,47 @@ public class MusicPlayerDialog extends BaseDialog {
                 }
             });
             abRow.add(abStatus).growX().left().padLeft(2f);
-            abRow.button(Core.bundle.get("musicplayer.abSetA"), Styles.flatBordert, () -> {
+            TextButton abA = textBtn(Core.bundle.get("musicplayer.abSetA"), () -> {
                 MusicPlayer.setAbA(MusicPlayer.currentTime());
                 rebuild();
-            }).height(Scl.scl(32f)).width(Scl.scl(86f));
-            abRow.button(Core.bundle.get("musicplayer.abSetB"), Styles.flatBordert, () -> {
+            });
+            abRow.add(abA).height(Scl.scl(BTN_H)).width(Scl.scl(86f));
+            TextButton abB = textBtn(Core.bundle.get("musicplayer.abSetB"), () -> {
                 MusicPlayer.setAbB(MusicPlayer.currentTime());
                 rebuild();
-            }).height(Scl.scl(32f)).width(Scl.scl(86f));
-            abRow.button(Core.bundle.get("musicplayer.abClear"), Styles.flatBordert, () -> {
+            });
+            abRow.add(abB).height(Scl.scl(BTN_H)).width(Scl.scl(86f));
+            TextButton abC = textBtn(Core.bundle.get("musicplayer.abClear"), () -> {
                 MusicPlayer.clearAb();
                 rebuild();
-            }).height(Scl.scl(32f)).width(Scl.scl(86f));
+            });
+            abRow.add(abC).height(Scl.scl(BTN_H)).width(Scl.scl(86f));
         }).growX().padTop(2f).row();
 
         // —— 底部：循环模式 / 倒放 / 停止 / 添加曲目（图标点缀提升可识别性） ——
-        // 四个按钮统一「格式」：flatBordert + 同一字号（不加 setFontScale，与停止/添加曲目一致）
-        // + 同一高度/间距 + 关闭换行与省略号。此前循环/倒放单独设了 0.9 字号，文字明显比停止/添加曲目小。
+        // 四个按钮一律走 textBtn(BTN_H)：同一字号（此前循环/倒放单独设了 0.9 字号，明显比停止/添加曲目小）、
+        // 同一高度与间距、关闭换行与省略号。固定宽度而非 growX（不等长文本切换不会让按钮忽大忽小）。
         cont.table(bottom -> {
             arc.scene.ui.Image botIcon = new arc.scene.ui.Image(Icon.music);
             botIcon.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("播放控制")));
             bottom.add(botIcon).size(Scl.scl(14f)).padRight(4f);
-            TextButton loop = new TextButton(loopModeText(), Styles.flatBordert);
-            loop.getLabel().setWrap(false);
-            loop.getLabel().setEllipsis(false);
+            TextButton loop = textBtn(loopModeText(), null);
+            // 点击即更新文案（固定宽的等长两字中文，不必等下一帧重建）
             loop.clicked(() -> {
                 MusicPlayer.cycleLoopMode();
                 loop.setText(loopModeText());
             });
-            // 固定宽高（不等长文本切换不导致按钮忽大忽小；flatBordert 内边距随字体字号/内容伸缩，
-            // 显式固定高度根治「点击后里行按钮抖动」）；文案等长中文，完整显示不省略
-            bottom.add(loop).width(Scl.scl(84f)).height(Scl.scl(34f)).pad(2f);
+            bottom.add(loop).width(Scl.scl(84f)).height(Scl.scl(BTN_H)).pad(2f);
 
-            TextButton rev = new TextButton(Core.bundle.get("musicplayer.reverse"), Styles.flatBordert);
-            rev.getLabel().setWrap(false);
-            rev.getLabel().setEllipsis(false);
-            final TextButton revF = rev;
-            revF.update(() -> revF.getLabel().setColor(MusicPlayer.isReverse() ? Pal.accent : Color.white));
-            revF.clicked(() -> MusicPlayer.toggleReverse());
-            bottom.add(rev).width(Scl.scl(84f)).height(Scl.scl(34f)).pad(2f);
+            TextButton rev = textBtn(Core.bundle.get("musicplayer.reverse"), MusicPlayer::toggleReverse);
+            rev.update(() -> rev.getLabel().setColor(MusicPlayer.isReverse() ? Pal.accent : Color.white));
+            bottom.add(rev).width(Scl.scl(84f)).height(Scl.scl(BTN_H)).pad(2f);
 
-            // 停止/添加曲目也显式固定宽度，与上述按钮一致——不用 growX()（会随 rebuild/pref 波动导致抖动）
-            TextButton stop = new TextButton(Core.bundle.get("musicplayer.stop"), Styles.flatBordert);
-            stop.getLabel().setWrap(false);
-            stop.getLabel().setEllipsis(false);
-            stop.clicked(MusicPlayer::stop);
-            bottom.add(stop).width(Scl.scl(96f)).height(Scl.scl(34f)).pad(2f);
+            TextButton stop = textBtn(Core.bundle.get("musicplayer.stop"), MusicPlayer::stop);
+            bottom.add(stop).width(Scl.scl(96f)).height(Scl.scl(BTN_H)).pad(2f);
 
-            TextButton add = new TextButton(Core.bundle.get("musicplayer.addTrack"), Styles.flatBordert);
-            add.getLabel().setWrap(false);
-            add.getLabel().setEllipsis(false);
-            add.clicked(this::showAddDialog);
-            bottom.add(add).width(Scl.scl(112f)).height(Scl.scl(34f)).pad(2f);
+            TextButton add = textBtn(Core.bundle.get("musicplayer.addTrack"), this::showAddDialog);
+            bottom.add(add).width(Scl.scl(112f)).height(Scl.scl(BTN_H)).pad(2f);
         }).growX().padTop(2f).row();
 
         // —— 更多设置：播放给他人 + 启用开关 + 悬浮条复位（紧凑面板，尽量缩小留白） ——
@@ -383,11 +388,9 @@ public class MusicPlayerDialog extends BaseDialog {
             enable.setChecked(MusicPlayer.isEnabled());
             enable.changed(() -> MusicPlayer.setEnabled(enable.isChecked()));
             more.add(enable).left().growX();
-            TextButton reset = new TextButton(Core.bundle.get("musicplayer.resetPos"), Styles.flatBordert);
-            reset.getLabel().setWrap(false);
-            reset.getLabel().setFontScale(Scl.scl(0.9f));
-            reset.clicked(() -> MusicBar.resetPosition());
-            more.add(reset).height(Scl.scl(34f)).width(Scl.scl(150f)).right();
+            // 重置位置：此前单独设了 0.9 字号（比同界面其他按钮文字小），现与其它动作按钮统一
+            TextButton reset = textBtn(Core.bundle.get("musicplayer.resetPos"), () -> MusicBar.resetPosition());
+            more.add(reset).height(Scl.scl(BTN_H)).width(Scl.scl(150f)).right();
         }).growX().padTop(2f).row();
 
         // —— 曲目列表（置于底部并 growY 填满剩余高度，消除设置界面下方空白） ——
@@ -593,18 +596,19 @@ public class MusicPlayerDialog extends BaseDialog {
             final int ai = i;
             boolean inAlbum = a.hashes.contains(t.cacheHash);
             String label = (inAlbum ? "[accent]✓ [/]" : "  ") + a.name;
-            TextButton b = new TextButton(label, Styles.flatBordert);
+            TextButton b = textBtn(label, null);
             b.clicked(() -> {
                 if (a.hashes.contains(t.cacheHash)) MusicPlayer.removeFromAlbum(ai, trackIndex);
                 else MusicPlayer.addToAlbum(ai, trackIndex);
                 dlg.hide();
                 rebuildRows();
             });
-            list.add(b).growX().height(Scl.scl(34f)).pad(2f).row();
+            list.add(b).growX().height(Scl.scl(BTN_H)).pad(2f).row();
         }
         ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
         dlg.cont.add(pane).grow().height(Scl.scl(220f));
-        dlg.buttons.button(Core.bundle.get("musicplayer.confirm"), Styles.flatBordert, dlg::hide).width(Scl.scl(120f)).height(Scl.scl(40f));
+        TextButton ok = textBtn(Core.bundle.get("musicplayer.confirm"), dlg::hide);
+        dlg.buttons.add(ok).width(Scl.scl(120f)).height(Scl.scl(BTN_H));
         dlg.closeOnBack();
         dlg.show();
     }
@@ -631,7 +635,8 @@ public class MusicPlayerDialog extends BaseDialog {
         TextField field = new TextField();
         field.setMessageText(Core.bundle.get("musicplayer.albumName"));
         dlg.cont.add(field).growX().pad(10f).row();
-        dlg.cont.button(Core.bundle.get("musicplayer.confirm"), Styles.flatBordert, () -> {
+        TextButton create = textBtn(Core.bundle.get("musicplayer.confirm"), null);
+        create.clicked(() -> {
             String name = field.getText().trim();
             if (name.length() > MusicPlayer.MAX_ALBUM_NAME_LENGTH) name = name.substring(0, MusicPlayer.MAX_ALBUM_NAME_LENGTH);
             if (!name.isEmpty()) {
@@ -640,7 +645,8 @@ public class MusicPlayerDialog extends BaseDialog {
                 rebuild();
             }
             dlg.hide();
-        }).width(Scl.scl(120f)).height(Scl.scl(40f));
+        });
+        dlg.cont.add(create).width(Scl.scl(120f)).height(Scl.scl(BTN_H));
         dlg.closeOnBack();
         dlg.show();
     }
@@ -652,14 +658,16 @@ public class MusicPlayerDialog extends BaseDialog {
         String q = "确定删除?";
         try { String v = Core.bundle.get("musicplayer.deleteConfirm"); if (v != null && !v.contains("??")) q = v; } catch (Exception ignored) {}
         dlg.cont.add(q + "\n[accent]" + (name.replace("[", "[[").replace("]", "]]")) + "[]").pad(10f).row();
-        dlg.buttons.button(Core.bundle.get("musicplayer.confirm"), Styles.flatBordert, () -> {
+        TextButton yes = textBtn(Core.bundle.get("musicplayer.confirm"), () -> {
             MusicPlayer.removeTrack(idx);
             rebuildRows();
             dlg.hide();
-        }).width(Scl.scl(100f)).height(Scl.scl(36f));
+        });
+        dlg.buttons.add(yes).width(Scl.scl(100f)).height(Scl.scl(BTN_H));
         String cancel = "取消";
         try { String v = Core.bundle.get("universal-junction.cancel"); if (v != null && !v.contains("??")) cancel = v; } catch (Exception ignored) {}
-        dlg.buttons.button(cancel, Styles.flatBordert, dlg::hide).width(Scl.scl(100f)).height(Scl.scl(36f));
+        TextButton no = textBtn(cancel, dlg::hide);
+        dlg.buttons.add(no).width(Scl.scl(100f)).height(Scl.scl(BTN_H));
         dlg.closeOnBack();
         dlg.show();
     }
@@ -678,10 +686,11 @@ public class MusicPlayerDialog extends BaseDialog {
                 list.add(new arc.scene.ui.Label(line, Styles.defaultLabel)).growX().left().row();
             }
         }).grow().pad(10f);
-        dlg.buttons.button(Core.bundle.get("musicplayer.confirm"), Styles.flatBordert, () -> {
+        TextButton ok = textBtn(Core.bundle.get("musicplayer.confirm"), () -> {
             dlg.hide();
             if (afterClose != null) afterClose.run();
-        }).width(Scl.scl(120f)).height(Scl.scl(40f));
+        });
+        dlg.buttons.add(ok).width(Scl.scl(120f)).height(Scl.scl(BTN_H));
         dlg.closeOnBack();
         dlg.show();
     }
@@ -717,16 +726,14 @@ public class MusicPlayerDialog extends BaseDialog {
         dlg.show();
     }
 
-    /** 导入界面用的图标+文字按钮（本 arc 的 TextButton 无「图标+文案」构造器，用表内 Image+TextButton 拼装） */
+    /** 导入界面用的图标+文字按钮（本 arc 的 TextButton 无「图标+文案」构造器，用表内 Image+TextButton 拼装）。
+     *  这里是「菜单项」而不是普通动作按钮，因此保持更高的行高（48），仅文字字号与其它按钮统一。 */
     private static void addIconButton(Table parent, arc.scene.style.Drawable icon, String bundleKey, Runnable action) {
         Table row = new Table();
         arc.scene.ui.Image img = new arc.scene.ui.Image(icon);
         img.setColor(Color.lightGray);
         row.add(img).size(Scl.scl(24f)).padRight(8f);
-        TextButton b = new TextButton(Core.bundle.get(bundleKey), Styles.flatBordert);
-        b.getLabel().setWrap(false);
-        b.clicked(action);
-        row.add(b).width(Scl.scl(216f)).height(Scl.scl(48f));
+        row.add(textBtn(Core.bundle.get(bundleKey), action)).width(Scl.scl(216f)).height(Scl.scl(48f));
         parent.add(row).pad(3f).row();
     }
 
@@ -739,7 +746,7 @@ public class MusicPlayerDialog extends BaseDialog {
             String label;
             try { String v = Core.bundle.get("music." + k); label = (v != null && !v.contains("??")) ? v : k; } catch (Exception e) { label = k; }
             final String key = k;
-            list.button(label, Styles.flatBordert, () -> {
+            TextButton row = textBtn(label, () -> {
                 MusicTrack t = MusicPlayer.trackByHash("int-" + key);
                 if (t != null) {
                     int idx = MusicPlayer.tracks().indexOf(t);
@@ -747,7 +754,8 @@ public class MusicPlayerDialog extends BaseDialog {
                 }
                 dlg.hide();
                 rebuild();
-            }).growX().height(Scl.scl(38f)).pad(2f).row();
+            });
+            list.add(row).growX().height(Scl.scl(BTN_H)).pad(2f).row();
         }
         ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
         dlg.cont.add(pane).grow().height(Scl.scl(260f));
@@ -805,7 +813,8 @@ public class MusicPlayerDialog extends BaseDialog {
             dlg.cont.add("[gray]" + Core.bundle.get("musicplayer.importToAlbum") + ": [accent]" + safe2 + "[]")
                     .growX().padTop(2f).row();
         }
-        dlg.cont.button(Core.bundle.get("musicplayer.confirm"), Styles.flatBordert, () -> {
+        TextButton okBtn = textBtn(Core.bundle.get("musicplayer.confirm"), null);
+        okBtn.clicked(() -> {
             String src = field.getText().trim();
             if (src.isEmpty()) { dlg.hide(); return; }
             String name = null;
@@ -826,7 +835,8 @@ public class MusicPlayerDialog extends BaseDialog {
             autoAddToCurrentAlbum(t);
             dlg.hide();
             rebuild();
-        }).width(Scl.scl(120f)).height(Scl.scl(40f));
+        });
+        dlg.cont.add(okBtn).width(Scl.scl(120f)).height(Scl.scl(BTN_H));
         dlg.closeOnBack();
         dlg.show();
     }

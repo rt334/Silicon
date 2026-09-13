@@ -166,7 +166,6 @@ public class MusicBar {
             TextButton speedBtn = new TextButton(speedLabel(), Styles.flatBordert);
             speedBtn.getLabel().setWrap(false);
             speedBtn.getLabel().setEllipsis(false);
-            speedBtn.getLabel().setFontScale(Scl.scl(0.9f));
             speedBtn.setColor(Pal.accent);
             speedBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("点击切换倍速")));
             final String[] lastSpeed = {speedLabel()};
@@ -187,7 +186,6 @@ public class MusicBar {
             TextButton albumBtn = new TextButton(albumScopeLabel(), Styles.flatBordert);
             albumBtn.getLabel().setWrap(false);
             albumBtn.getLabel().setEllipsis(true);
-            albumBtn.getLabel().setFontScale(Scl.scl(0.9f));
             albumBtn.setColor(Pal.accent);
             albumBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("点击切换专辑")));
             final String[] lastScope = {albumScopeLabel()};
@@ -207,7 +205,6 @@ public class MusicBar {
             TextButton loopBtn = new TextButton(loopModeLabel(), Styles.flatBordert);
             loopBtn.getLabel().setWrap(false);
             loopBtn.getLabel().setEllipsis(false);
-            loopBtn.getLabel().setFontScale(Scl.scl(0.9f));
             loopBtn.setColor(Pal.accent);
             loopBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("点击切换循环模式")));
             final String[] lastLoop = {loopModeLabel()};
