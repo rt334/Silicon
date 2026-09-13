@@ -41,7 +41,17 @@ public class TrackProbe {
         if (name.endsWith(".mp3") || startsWith(head, "ID3") || mpegSync(head) >= 0) {
             return mp3Duration(f, head);
         }
+        if (isMp4(head) || name.endsWith(".m4a") || name.endsWith(".mp4") || name.endsWith(".aac")) {
+            float d = Mp4Demuxer.durationSeconds(f);
+            if (d > 0) return d;
+        }
         return -1f;
+    }
+
+    /** 是否为 ISO-BMFF（MP4/M4A）：第 4~8 字节为 ftyp */
+    static boolean isMp4(byte[] head) {
+        return head != null && head.length >= 8
+            && head[4] == 'f' && head[5] == 't' && head[6] == 'y' && head[7] == 'p';
     }
 
     /** FLAC：读 STREAMINFO（注意必须用独立 decoder 实例，且只调 readStreamInfo 不调 decode） */

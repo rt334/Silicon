@@ -30,6 +30,41 @@ public final class Mp4Demuxer {
 
     private Mp4Demuxer() {}
 
+    /**
+     * 只读 {@code moov→mvhd} 的时长（不解封装、不解码，毫秒级）。
+     * <p>
+     * 列表时长必须能快速给出，所以这里不建立帧表（stsz 有几万条），只读 mvhd 的
+     * timescale/duration。返回 -1 表示无法判定。
+     */
+    public static float durationSeconds(File f) {
+        if (f == null || !f.isFile()) return -1f;
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            long fileLen = raf.length();
+            long moov = findBox(raf, 0, fileLen, "moov", null);
+            if (moov < 0) return -1f;
+            long moovEnd = boxEnd(raf, moov - 8, fileLen);
+            long mvhd = findBoxIn(raf, moov, moovEnd, "mvhd");
+            if (mvhd < 0) return -1f;
+            raf.seek(mvhd);
+            int version = raf.readUnsignedByte();
+            raf.skipBytes(3); // flags
+            long timescale;
+            long duration;
+            if (version == 1) {
+                raf.skipBytes(16); // creation + modification (64 位)
+                timescale = raf.readInt() & 0xFFFFFFFFL;
+                duration = raf.readLong();
+            } else {
+                raf.skipBytes(8); // creation + modification (32 位)
+                timescale = raf.readInt() & 0xFFFFFFFFL;
+                duration = raf.readInt() & 0xFFFFFFFFL;
+            }
+            if (timescale > 0 && duration > 0) return duration / (float) timescale;
+        } catch (Exception ignored) {
+        }
+        return -1f;
+    }
+
     public static Audio parse(File f) throws IOException {
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
             long fileLen = raf.length();
@@ -175,7 +210,8 @@ public final class Mp4Demuxer {
     private static long[] readStsz(RandomAccessFile raf, long stbl, long stblEnd) throws IOException {
         long stsz = findBox(raf, stbl, stblEnd, "stsz", null);
         if (stsz < 0) return null;
-        raf.seek(stsz + 4 + 4); // version/flags + sampleSize
+        // findBox 返回的是「盒子内容起点」，stsz 内容是 version/flags(4) + sampleSize(4) + sampleCount(4) + 表
+        raf.seek(stsz + 4); // version/flags 之后即 sampleSize
         int constant = raf.readInt();
         int count = raf.readInt();
         if (count <= 0 || count > 4_000_000) return null;
