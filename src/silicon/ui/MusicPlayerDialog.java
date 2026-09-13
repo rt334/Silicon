@@ -116,7 +116,8 @@ public class MusicPlayerDialog extends BaseDialog {
                 // 真实文本宽（上限 maxPref=520），若不钳制，长曲名会把「现在播放」面板撑到超出弹窗宽度，
                 // 行右端被裁切 →「名字不全/有空间仍循环」。520 为弹窗宽度减去圆盘/边距后的可用宽。
                 // 给足高度 + MarqueeLabel 内部垂直居中，避免名称上半部分被裁切
-                nameLbl[0].maxPref = Scl.scl(520f);
+                // 适配屏幕：曲名可用宽取屏幕宽的 32%（上限 520 Scl），窄屏下弹窗不会被长曲名撑破
+                nameLbl[0].maxPref = Math.min(Scl.scl(520f), Core.graphics.getWidth() * 0.32f);
                 info.add(nameLbl[0]).growX().width(Scl.scl(520f)).height(Scl.scl(36f)).padRight(6f);
             }).growX();
             // 每帧刷新状态与曲名（悬浮条/自动推进切换曲目时这里也跟着变）；仅内容变化时 setText 避免反复重排。
@@ -377,28 +378,40 @@ public class MusicPlayerDialog extends BaseDialog {
             bottom.add(add).width(Scl.scl(112f)).height(Scl.scl(BTN_H)).pad(2f);
         }).growX().padTop(2f).row();
 
-        // —— 更多设置：播放给他人 + 启用开关 + 悬浮条复位（紧凑面板，尽量缩小留白） ——
+        // —— 更多设置：播放给他人 / 总开关 / 悬浮条复位 ——
+        // 两个勾选框**分行并各带说明**：原先并排挤在一行、只靠图标区分，总开关被误点后唯一可见效果
+        // 就是「悬浮条消失」（音乐照常播放），用户完全找不到原因。分行 + 说明文字后一眼能看懂。
         cont.table(more -> {
             more.background(Styles.grayPanel);
             more.margin(4f, 8f, 4f, 8f);
-            more.defaults().pad(2f);
-            arc.scene.ui.Image shareIcon = new arc.scene.ui.Image(Icon.chat);
-            shareIcon.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("共享给他人")));
-            more.add(shareIcon).size(Scl.scl(12f)).padRight(2f);
-            CheckBox share = new CheckBox(Core.bundle.get("musicplayer.share"));
-            share.setChecked(MusicPlayer.isShareEnabled());
-            share.changed(() -> MusicPlayer.setShareEnabled(share.isChecked()));
-            more.add(share).left().growX();
-            arc.scene.ui.Image enIcon = new arc.scene.ui.Image(Icon.ok);
-            enIcon.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("总开关")));
-            more.add(enIcon).size(Scl.scl(12f)).padRight(2f);
-            CheckBox enable = new CheckBox(Core.bundle.get("musicplayer.enable"));
-            enable.setChecked(MusicPlayer.isEnabled());
-            enable.changed(() -> MusicPlayer.setEnabled(enable.isChecked()));
-            more.add(enable).left().growX();
-            // 重置位置：此前单独设了 0.9 字号（比同界面其他按钮文字小），现与其它动作按钮统一
-            TextButton reset = textBtn(Core.bundle.get("musicplayer.resetPos"), () -> MusicBar.resetPosition());
-            more.add(reset).height(Scl.scl(BTN_H)).width(Scl.scl(150f)).right();
+            more.defaults().pad(2f).left();
+
+            more.table(row -> {
+                row.add(new arc.scene.ui.Image(Icon.chat)).size(Scl.scl(12f)).padRight(4f);
+                CheckBox share = new CheckBox(Core.bundle.get("musicplayer.share"));
+                share.setChecked(MusicPlayer.isShareEnabled());
+                share.changed(() -> MusicPlayer.setShareEnabled(share.isChecked()));
+                row.add(share).left();
+                row.add(Core.bundle.get("musicplayer.shareHint")).color(Color.lightGray)
+                        .fontScale(Scl.scl(0.85f)).padLeft(8f).left();
+            }).growX().left().row();
+
+            more.table(row -> {
+                row.add(new arc.scene.ui.Image(Icon.ok)).size(Scl.scl(12f)).padRight(4f);
+                CheckBox enable = new CheckBox(Core.bundle.get("musicplayer.enable"));
+                enable.setChecked(MusicPlayer.isEnabled());
+                enable.changed(() -> MusicPlayer.setEnabled(enable.isChecked()));
+                row.add(enable).left();
+                // 总开关的后果写清楚（关掉后悬浮条会隐藏），避免再次出现「条怎么不见了」
+                row.add(Core.bundle.get("musicplayer.enableHint")).color(Pal.accent)
+                        .fontScale(Scl.scl(0.85f)).padLeft(8f).left();
+            }).growX().left().row();
+
+            more.table(row -> {
+                // 重置位置：此前单独设了 0.9 字号（比同界面其他按钮文字小），现与其它动作按钮统一
+                TextButton reset = textBtn(Core.bundle.get("musicplayer.resetPos"), () -> MusicBar.resetPosition());
+                row.add(reset).height(Scl.scl(BTN_H)).width(Scl.scl(150f)).right();
+            }).growX().right().row();
         }).growX().padTop(2f).row();
 
         // —— 曲目列表（置于底部并 growY 填满剩余高度，消除设置界面下方空白） ——
@@ -443,7 +456,11 @@ public class MusicPlayerDialog extends BaseDialog {
         ScrollPane pane = new ScrollPane(trackTable, Styles.defaultPane);
         pane.setScrollingDisabled(true, false);
         pane.setFadeScrollBars(false);
-        cont.add(pane).growX().growY().minHeight(Scl.scl(140f)).padTop(2f).row();
+        // 适配屏幕：列表高度取屏幕高的 30%（夹在 140~420 Scl 之间）。
+        // 原来用 growY + minHeight：弹窗高度由内容决定，曲目一多列表就把弹窗撑得比屏幕还高，
+        // 下方内容被切掉、背景也覆盖不到——固定成屏幕比例后，多出来的曲目在列表内滚动。
+        float listH = Math.max(Scl.scl(140f), Math.min(Scl.scl(420f), Core.graphics.getHeight() * 0.30f));
+        cont.add(pane).growX().height(listH).padTop(2f).row();
     }
 
     private String nowPlayingLabel() {

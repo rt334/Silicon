@@ -187,6 +187,9 @@ public class Silicon extends Mod {
                 st.pref(new CustomSetting(t -> t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(8f)));
                 // —— 音乐播放器 ——
                 st.pref(new CustomSetting(t -> t.button(Core.bundle.get("musicplayer.open"), Styles.defaultt, MusicPlayerDialog::open).width(200f).padTop(6f)));
+                // 总开关：关掉后悬浮条整体隐藏、网络收发停止（本地播放不受影响）。
+                // 以前只藏在弹窗的「更多设置」里，用户误点后只觉得「悬浮条不见了」而找不到开关，因此也放进设置页。
+                st.checkPref("musicplayer.enabled", true, v -> MusicPlayer.setEnabled(v));
                 // 超长曲目 WAV 上限（MB）：解码出的 PCM 体积 = 秒 × 采样率 × 声道 × 2，
                 // 超过该上限就降采样（优先保立体声、其次并单声道，采样率不低于 16kHz），
                 // 避免一首 44 分钟的长曲（约 471MB）占满 512MB 缓存预算把别的曲目挤出去。
@@ -195,13 +198,15 @@ public class Silicon extends Mod {
                         silicon.audio.AudioTranscoder.MIN_MAX_WAV_MB,
                         silicon.audio.AudioTranscoder.MAX_MAX_WAV_MB, 16,
                         i -> i + " MB");
-                // FFmpeg 路径（可选）：填了就能播放/精确拖动任意格式（m4a/aac/wma…），留空则只用内置解码
+                // FFmpeg 路径（可选）：填了就能播放/精确拖动任意格式（m4a/aac/wma…），留空则只用内置解码。
+                // 标签与输入框分两行：横排时输入框被标签挤得很窄，长路径（形如 C:\ffmpeg\bin\ffmpeg.exe）
+                // 根本看不全，也无法直接整段复制/粘贴核对。
                 st.pref(new CustomSetting(t -> {
-                    t.add(Core.bundle.get("musicplayer.ffmpeg")).left().padRight(8f);
+                    t.add(Core.bundle.get("musicplayer.ffmpeg")).left().padBottom(4f).row();
                     t.field(Core.settings.getString(silicon.audio.AudioTranscoder.CFG_FFMPEG, ""), s -> {
                         Core.settings.put(silicon.audio.AudioTranscoder.CFG_FFMPEG, s == null ? "" : s.trim());
                         silicon.audio.AudioTranscoder.resetProbe();
-                    }).growX().height(36f).padTop(4f);
+                    }).growX().height(36f);
                 }));
 
                 // —— 更新 ——

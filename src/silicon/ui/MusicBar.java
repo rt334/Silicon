@@ -96,6 +96,8 @@ public class MusicBar {
         //  —— 两处尺寸都按下文修正过）
         bar.background(Styles.black6);
         bar.margin(BAR_MARGIN);
+        // 展开态宽度（屏幕自适应，在下面 expanded 分支里按屏幕算）：声明在分支外，供 setSize 使用
+        final float[] barW = {Scl.scl(EXPANDED_WIDTH)};
 
         if (collapsed) {
             // 收起态：播放中显示暂停、暂停中显示播放，颜色随状态高亮，悬停显示曲名
@@ -244,13 +246,20 @@ public class MusicBar {
             collapseBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("收起")));
             controls.add(collapseBtn).size(Scl.scl(32f)).pad(1f);
 
+            // 适配屏幕：展开条宽度 = 在「按钮排最小宽」与「600 Scl」之间取屏幕放得下的值。
+            // 屏幕窄时按屏幕收窄（并让曲名可用宽跟着收窄），屏幕宽时保持 600 Scl 不变，
+            // 这样大屏/小屏都不会出现「条比屏幕宽被顶到屏幕外」或「曲名行内容溢出面板」。
+            barW[0] = Math.max(controls.getPrefWidth() + BAR_MARGIN * 2f,
+                    Math.min(Scl.scl(EXPANDED_WIDTH), Core.graphics.getWidth() - Scl.scl(16f)));
+
             bar.add(controls).growX().height(Scl.scl(40f)).padBottom(2f);
             bar.row();
             // 曲名 + 当前/总时长：内嵌横向 Table，growX 铺满整条固定宽度 → 长曲名在条内滚动裁剪、不拉长整条
             Table infoRow = new Table();
             MarqueeLabel track = new MarqueeLabel(trackLabel(), Styles.outlineLabel);
             track.setColor(Color.white);
-            track.maxPref = Scl.scl(476f);
+            // 曲名可用宽 = 条宽 - 右侧时长标签 - 边距：条宽随屏幕变化时这里同步（否则窄屏会把时长挤出面板）
+            track.maxPref = Math.max(Scl.scl(120f), barW[0] - Scl.scl(96f) - Scl.scl(24f));
             track.clicked(() -> MusicPlayerDialog.open());
             final String[] lastTrack = {trackLabel()};
             track.update(() -> {
@@ -286,12 +295,12 @@ public class MusicBar {
 
         bar.pack();
         if (!collapsed) {
-            // 展开态用**固定宽度**（600 Scl）：三行都是 growX，宽度不需要问内容要。
-            // 关键修复：原先写的是 Math.max(Scl.scl(600f), bar.getPrefWidth())，只要哪个子元素的 pref
-            // 被算成异常大值，条就会宽到超过屏幕 → clampBar 把 x 顶到最小值、条体大部分在屏幕外
-            // （实测 settings 里 pos.x=3、pos.top=1720）。三行的高度现在也都显式固定
+            // 展开态用上面算好的**屏幕自适应宽度**（三行都是 growX，宽度不需要问内容要）。
+            // 关键：绝不使用 bar.getPrefWidth()——只要哪个子元素的 pref 被算成异常大值，
+            // 条就会宽到超过屏幕 → clampBar 把 x 顶到最小值、条体大部分在屏幕外
+            // （实测 settings 里 pos.x=3、pos.top=1720）。三行高度也都显式固定
             // （按钮排 40 / 曲名行 44 / 进度条 24），因此 pref 高度同样是确定的，不会再被撑高。
-            bar.setSize(Scl.scl(EXPANDED_WIDTH), bar.getPrefHeight());
+            bar.setSize(barW[0], bar.getPrefHeight());
         }
         // 兜底：无论布局算出多大的 pref，面板都不许超过屏幕。否则 clampBar 会把它推到 y=2，
         // 条内第一行（按钮排）就被推到屏幕上方看不见 —— 表现成「整个悬浮条不见了」（实测出现过：
