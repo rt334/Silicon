@@ -427,6 +427,15 @@ public class MusicPlayer {
         }
 
         Events.run(EventType.Trigger.update, MusicPlayer::update);
+        // 退出地图（回到主菜单/进地图编辑器）时立刻停止播放：此前音乐会跟着回到主菜单继续响。
+        // 只在「离开游戏地图」这个方向停（to == menu）；进入地图属于用户主动点播，不动。
+        // 停播顺带会让原生音乐压制自动放开（见 tickNativeMusic 的 isAudioActive 判定）。
+        Events.on(EventType.StateChangeEvent.class, e -> {
+            if (e.to == mindustry.core.GameState.State.menu && (playing || isStarting() || pausedPosition > 0f)) {
+                Log.info("[Music] leaving map, stopping playback");
+                stop();
+            }
+        });
     }
 
     private static void loadAlbums() {
