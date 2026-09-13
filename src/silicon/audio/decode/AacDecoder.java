@@ -2,11 +2,6 @@ package silicon.audio.decode;
 
 import net.sourceforge.jaad.aac.Decoder;
 import net.sourceforge.jaad.aac.SampleBuffer;
-import net.sourceforge.jaad.mp4.MP4Container;
-import net.sourceforge.jaad.mp4.api.AudioTrack;
-import net.sourceforge.jaad.mp4.api.Frame;
-import net.sourceforge.jaad.mp4.api.Movie;
-import net.sourceforge.jaad.mp4.api.Track;
 
 import java.io.File;
 import java.io.IOException;
@@ -14,12 +9,14 @@ import java.io.RandomAccessFile;
 import java.util.function.IntConsumer;
 
 /**
- * m4a / mp4 / aac 解码（JAAD，公共领域；纯 Java AAC-LC + HE-AAC + MP4 解封装）。
+ * m4a / mp4 / aac 解码：**自写最小 MP4 解封装**（{@link Mp4Demuxer}）+ **jaad 的 AAC 解码核心**。
  * <p>
- * SoLoud 完全不认识这些格式（既无解码器也读不了非 ASCII 路径），因此这里把它们解成
- * 16bit PCM WAV 再交给 SoLoud —— 与 mp3/flac 同一条“统一解码”路径，拖动因此也是采样级精确。
+ * 为什么这样拼：SoLoud 完全不认识这些格式；jaad 的 AAC 解码核心可用，但它的**容器解析**对现代
+ * 封装过于脆弱（实测多个真实 mp4 报 {@code box too large for parent}），因此解封装自己做：
+ * 从 stsd/esds 取 ASC，从 stsz/stsc/stco 算出每帧偏移与长度，再把裸 AAC 帧交给 jaad 解码。
  * <p>
- * 打包时已排除 jaad 中依赖 javax.sound / java.awt 的类（SPI/播放器/封面盒），只保留解码核心。
+ * 产物是 16bit PCM WAV（与 mp3/flac/opus 同一条“统一解码”路径）→ 拖动采样级精确；
+ * 进度按「已解帧数 / 总帧数」上报，因此 m4a 现在也有真实百分比进度。
  */
 public class AacDecoder implements PcmDecoder {
 
@@ -34,54 +31,51 @@ public class AacDecoder implements PcmDecoder {
 
     @Override
     public long decodeToWav(File src, File outWav, IntConsumer onPercent) throws Exception {
-        try (RandomAccessFile raf = new RandomAccessFile(src, "r")) {
-            MP4Container container = new MP4Container(raf);
-            Movie movie = container.getMovie();
-            AudioTrack track = null;
-            for (Track t : movie.getTracks()) {
-                if (t instanceof AudioTrack at) {
-                    track = at;
-                    break;
-                }
-            }
-            if (track == null) throw new IOException("no audio track in mp4/m4a");
-            byte[] asc = track.getDecoderSpecificInfo();
-            if (asc == null || asc.length == 0) throw new IOException("no AAC decoder config (ASC)");
-            int channels = Math.max(1, track.getChannelCount());
-            int rate = track.getSampleRate();
-            if (rate <= 0) throw new IOException("bad sample rate");
-            Decoder decoder = new Decoder(asc);
-            SampleBuffer sb = new SampleBuffer();
-            sb.setBigEndian(false); // 我们的 WavWriter 写小端
-
-            WavWriter wav = new WavWriter(outWav, rate, channels);
-            long frames = 0;
-            int lastPercent = -1;
-            double duration = movie.getDuration();
-            try {
-                while (track.hasMoreFrames()) {
-                    Frame frame = track.readNextFrame();
-                    byte[] payload = frame.getData();
-                    if (payload == null || payload.length == 0) continue;
-                    decoder.decodeFrame(payload, sb);
-                    byte[] pcm = sb.getData();
-                    if (pcm != null && pcm.length > 0) {
-                        wav.writeBytes(pcm, 0, pcm.length);
-                        frames += pcm.length / (2L * channels);
-                    }
-                    if (onPercent != null && duration > 0) {
-                        int p = (int) Math.min(100.0, frame.getTime() / duration * 100.0);
-                        if (p != lastPercent) {
-                            lastPercent = p;
-                            onPercent.accept(p);
-                        }
-                    }
-                }
-            } finally {
-                wav.close();
-            }
-            if (frames <= 0) throw new IOException("no AAC frames decoded");
-            return frames;
+        Mp4Demuxer.Audio a = Mp4Demuxer.parse(src);
+        if (a == null || a.asc == null || a.frameOffsets.length == 0) {
+            throw new IOException("no AAC track/ASC found");
         }
+        Decoder decoder = new Decoder(a.asc);
+        SampleBuffer sb = new SampleBuffer();
+        sb.setBigEndian(false); // 我们的 WavWriter 写小端
+
+        WavWriter wav = null;
+        long frames = 0;
+        int lastPercent = -1;
+        int total = a.frameOffsets.length;
+        try (RandomAccessFile raf = new RandomAccessFile(src, "r")) {
+            int maxSize = 0;
+            for (int s : a.frameSizes) maxSize = Math.max(maxSize, s);
+            byte[] frame = new byte[Math.max(1024, maxSize)];
+            for (int i = 0; i < total; i++) {
+                int size = a.frameSizes[i];
+                if (size <= 0 || size > frame.length) continue;
+                raf.seek(a.frameOffsets[i]);
+                raf.readFully(frame, 0, size);
+                decoder.decodeFrame(frame, sb);
+                byte[] pcm = sb.getData();
+                if (wav == null) {
+                    int rate = sb.getSampleRate() > 0 ? sb.getSampleRate() : a.sampleRate;
+                    int ch = sb.getChannels() > 0 ? sb.getChannels() : a.channels;
+                    if (rate <= 0 || ch <= 0) throw new IOException("bad AAC stream info");
+                    wav = new WavWriter(outWav, rate, ch);
+                }
+                if (pcm != null && pcm.length > 0) {
+                    wav.writeBytes(pcm, 0, pcm.length);
+                    frames += pcm.length / (2L * Math.max(1, wav.channels()));
+                }
+                if (onPercent != null) {
+                    int p = (int) ((i + 1L) * 100L / total);
+                    if (p != lastPercent) {
+                        lastPercent = p;
+                        onPercent.accept(p);
+                    }
+                }
+            }
+        } finally {
+            if (wav != null) wav.close();
+        }
+        if (frames <= 0) throw new IOException("no AAC frames decoded");
+        return frames;
     }
 }
