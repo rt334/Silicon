@@ -12,8 +12,11 @@ import java.io.InputStream;
  * m4a/aac/opus/wma 等则交给可选的 FFmpeg。
  */
 public class InternalDecoders {
+    /** 注意顺序：AacDecoder 在 Mp3Decoder 之前——ADTS 同步字（FF F1）也满足 MPEG 同步字判定，
+     *  若 mp3 先匹配会把 .aac 当 MP3 解（实测表现为「时长 0.036s + 解码失败」）。
+     *  AacDecoder 的 accepts 用强校验（layer 位必须为 00，MP3 不可能满足），因此不会反过来误吞 mp3。 */
     private static final PcmDecoder[] DECODERS = {
-            new FlacDecoder(), new Mp3Decoder(), new AacDecoder(), new OggOpusDecoder()
+            new FlacDecoder(), new AacDecoder(), new Mp3Decoder(), new OggOpusDecoder()
     };
 
     private InternalDecoders() {}

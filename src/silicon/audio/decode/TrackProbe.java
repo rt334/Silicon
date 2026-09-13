@@ -38,14 +38,71 @@ public class TrackProbe {
         if (name.endsWith(".flac") || (head.length >= 4 && head[0] == 'f' && head[1] == 'L' && head[2] == 'a' && head[3] == 'C')) {
             return flacDuration(f);
         }
+        // 注意顺序：ADTS 的 FF F1 也满足 mpegSync，必须先判 ADTS 再判 mp3
+        if (name.endsWith(".aac") || name.endsWith(".adts") || AdtsDemuxer.looksLike(head)) {
+            float d = AdtsDemuxer.durationSeconds(f);
+            if (d > 0) return d;
+            return -1f;
+        }
         if (name.endsWith(".mp3") || startsWith(head, "ID3") || mpegSync(head) >= 0) {
             return mp3Duration(f, head);
         }
-        if (isMp4(head) || name.endsWith(".m4a") || name.endsWith(".mp4") || name.endsWith(".aac")) {
+        if (startsWith(head, "OggS")) {
+            float d = oggDuration(f);
+            if (d > 0) return d;
+        }
+        if (isMp4(head) || name.endsWith(".m4a") || name.endsWith(".mp4")) {
             float d = Mp4Demuxer.durationSeconds(f);
             if (d > 0) return d;
         }
         return -1f;
+    }
+
+    /**
+     * Ogg（vorbis/opus）时长：读**最后一个 OggS 页**的 granulePosition。
+     * <p>
+     * granule 是「已输出的采样数」，除以采样率即时长：opus 固定 48000（并减去 preSkip），
+     * vorbis 用识别头里的采样率。只读文件尾部 64KB，毫秒级。
+     */
+    static float oggDuration(File f) {
+        byte[] head = InternalDecoders.readHead(f, 64);
+        if (head == null || head.length < 44) return -1f;
+        int rate;
+        long preSkip = 0;
+        if (head[28] == 'O' && head[29] == 'p' && head[30] == 'u' && head[31] == 's') {
+            rate = 48000; // Opus 内部固定 48kHz
+            preSkip = (head[38] & 0xFF) | ((head[39] & 0xFF) << 8);
+        } else if (head[28] == 1 && head[29] == 'v' && head[30] == 'o' && head[31] == 'r') {
+            rate = (head[40] & 0xFF) | ((head[41] & 0xFF) << 8) | ((head[42] & 0xFF) << 16) | ((head[43] & 0xFF) << 24);
+        } else {
+            return -1f;
+        }
+        if (rate <= 0) return -1f;
+        long granule = lastGranule(f);
+        if (granule <= 0) return -1f;
+        long samples = granule - preSkip;
+        if (samples <= 0) return -1f;
+        return samples / (float) rate;
+    }
+
+    /** 尾部最后一个 OggS 页的 granulePosition（找不到返回 -1） */
+    static long lastGranule(File f) {
+        int window = (int) Math.min(f.length(), 64 * 1024);
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r")) {
+            long base = f.length() - window;
+            byte[] buf = new byte[window];
+            raf.seek(base);
+            raf.readFully(buf);
+            for (int i = window - 27; i >= 0; i--) {
+                if (buf[i] == 'O' && buf[i + 1] == 'g' && buf[i + 2] == 'g' && buf[i + 3] == 'S') {
+                    long g = 0;
+                    for (int k = 7; k >= 0; k--) g = (g << 8) | (buf[i + 6 + k] & 0xFFL);
+                    if (g > 0) return g;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return -1;
     }
 
     /** 是否为 ISO-BMFF（MP4/M4A）：第 4~8 字节为 ftyp */

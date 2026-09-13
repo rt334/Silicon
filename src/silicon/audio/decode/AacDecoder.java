@@ -23,15 +23,27 @@ public class AacDecoder implements PcmDecoder {
     @Override
     public boolean accepts(String fileName, byte[] head) {
         String n = fileName == null ? "" : fileName.toLowerCase();
-        if (n.endsWith(".m4a") || n.endsWith(".mp4") || n.endsWith(".aac") || n.endsWith(".adts")) return true;
         // ISO-BMFF 的 ftyp box：偏移 4 起为 'ftyp'
-        return head != null && head.length >= 12
-                && head[4] == 'f' && head[5] == 't' && head[6] == 'y' && head[7] == 'p';
+        if (head != null && head.length >= 12
+                && head[4] == 'f' && head[5] == 't' && head[6] == 'y' && head[7] == 'p') return true;
+        if (n.endsWith(".m4a") || n.endsWith(".mp4")) return true;
+        // 裸 ADTS：强校验（layer 位必须为 00），因此不会被 mp3 抢走、也不会误吞 mp3
+        if (AdtsDemuxer.looksLike(head)) return true;
+        return n.endsWith(".aac") || n.endsWith(".adts");
     }
 
     @Override
     public long decodeToWav(File src, File outWav, IntConsumer onPercent) throws Exception {
-        Mp4Demuxer.Audio a = Mp4Demuxer.parse(src);
+        // 两条解封装路径：m4a/mp4 走 moov/stbl 帧表；裸 ADTS（.aac）走逐帧头
+        byte[] head = new byte[12];
+        int n = 0;
+        try (java.io.FileInputStream in = new java.io.FileInputStream(src)) {
+            int r;
+            while (n < 12 && (r = in.read(head, n, 12 - n)) > 0) n += r;
+        }
+        Mp4Demuxer.Audio a = (n >= 8 && head[4] == 'f' && head[5] == 't' && head[6] == 'y' && head[7] == 'p')
+                ? Mp4Demuxer.parse(src)
+                : AdtsDemuxer.parse(src);
         if (a == null || a.asc == null || a.frameOffsets.length == 0) {
             throw new IOException("no AAC track/ASC found");
         }
