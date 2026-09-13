@@ -12,7 +12,9 @@ import java.io.InputStream;
  * m4a/aac/opus/wma 等则交给可选的 FFmpeg。
  */
 public class InternalDecoders {
-    private static final PcmDecoder[] DECODERS = {new FlacDecoder(), new Mp3Decoder()};
+    private static final PcmDecoder[] DECODERS = {
+            new FlacDecoder(), new Mp3Decoder(), new AacDecoder(), new OggOpusDecoder()
+    };
 
     private InternalDecoders() {}
 
