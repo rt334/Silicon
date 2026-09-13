@@ -65,10 +65,16 @@ public class FlacDecoder implements PcmDecoder {
                 }
             });
 
-            decoder.decode();
-            if (error[0] != null) throw error[0];
-            if (!st.started) throw new IOException("no flac stream info");
-            st.finish();
+            try {
+                decoder.decode();
+                if (error[0] != null) throw error[0];
+                if (!st.started) throw new IOException("no flac stream info");
+                st.finish();
+            } finally {
+                // 必须无条件关闭 WavWriter：解码抛异常/回调里存了 error 时，原先 finish() 不会被调用，
+                // RandomAccessFile 句柄泄漏，而且 Windows 下调用方的 tmp.delete() 会因文件被占用而失败。
+                st.closeQuietly();
+            }
             return st.framesWritten;
         }
     }
@@ -90,7 +96,9 @@ public class FlacDecoder implements PcmDecoder {
         private int carryLen;
         private short[] acc;
         private int accLen;
-        private final short[] single = new short[1];
+        /** 输出缓冲（攒块写，见 emit/flushOut） */
+        private final short[] out = new short[8192];
+        private int outLen;
         private int sampleIndex;
 
         State(File out, java.util.function.IntConsumer onPercent) {
@@ -142,8 +150,7 @@ public class FlacDecoder implements PcmDecoder {
 
         private void push(short s) throws IOException {
             if (decimation == 1) {
-                single[0] = s;
-                wav.writeSamples(single, 0, 1);
+                emit(s);
                 if (++sampleIndex == channels) {
                     framesWritten++;
                     sampleIndex = 0;
@@ -160,15 +167,41 @@ public class FlacDecoder implements PcmDecoder {
             if (accLen == channels * decimation) flushGroup(decimation);
         }
 
+        /** 攒够一块再写：此前逐样本调 writeSamples（每样本一次 2 字节数组分配 + 一次无缓冲 write），
+         *  44.1k 立体声一首 3 分钟曲要 1500 万次系统调用——这是 flac 解码慢的主因。 */
+        private void emit(short s) throws IOException {
+            if (outLen == out.length) flushOut();
+            out[outLen++] = s;
+        }
+
+        private void flushOut() throws IOException {
+            if (outLen == 0) return;
+            wav.writeSamples(out, 0, outLen);
+            outLen = 0;
+        }
+
+        /** 关闭输出（幂等）：无论正常结束还是异常退出都要释放句柄 */
+        void closeQuietly() {
+            try {
+                flushOut();
+            } catch (Exception ignored) {
+            }
+            if (wav != null) {
+                try {
+                    wav.close();
+                } catch (Exception ignored) {
+                }
+                wav = null;
+            }
+        }
+
         /** 盒式平均：decimation 个输入帧 → 1 个输出帧 */
         private void flushGroup(int group) throws IOException {
-            short[] out = new short[channels];
             for (int c = 0; c < channels; c++) {
                 int sum = 0;
                 for (int k = 0; k < group; k++) sum += acc[k * channels + c];
-                out[c] = (short) (sum / group);
+                emit((short) (sum / group));
             }
-            wav.writeSamples(out, 0, channels);
             framesWritten++;
             accLen = 0;
             reportProgress();
@@ -187,6 +220,7 @@ public class FlacDecoder implements PcmDecoder {
             if (decimation > 1 && accLen >= channels) {
                 flushGroup(accLen / channels); // 收尾不足一组时按已有样本平均，避免丢尾巴
             }
+            flushOut(); // 缓冲里不足一块的尾巴也必须写出去，否则 WAV 会缺最后一小段
             if (wav != null) wav.close();
         }
     }

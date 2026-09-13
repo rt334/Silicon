@@ -110,7 +110,8 @@ public class MusicBar {
                 btn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
             });
             btn.addListener(new Tooltip(t -> {
-                String cur = MusicPlayer.currentTrack() == null ? "none" : MusicPlayer.currentTrack().name;
+                MusicTrack curTrack = MusicPlayer.currentTrack();
+                String cur = (curTrack == null || curTrack.name == null) ? "none" : curTrack.name;
                 t.background(Styles.black6).margin(4f).add(cur.replace("[", "[[").replace("]", "]]"));
             }));
             bar.add(btn).size(COLLAPSED_BTN);
@@ -537,7 +538,12 @@ public class MusicBar {
             float period = tw + Scl.scl(GAP);
             float ph = scroll % period;
             Draw.flush();
-            boolean clipped = ScissorStack.push(new Rect(this.x, this.y, cw, this.height));
+            // 裁剪矩形必须是**舞台/屏幕坐标**：ScissorStack.push 直接把矩形喂给 glScissor（不乘矩阵），
+            // 而 this.x/this.y 在弹窗里是「对话框局部坐标」（Dialog.show 会 setTransform(true)、
+            // 子元素走 Draw.trans）——直接用局部坐标会让裁剪区域整体偏移对话框位置，
+            // 结果是弹窗里的长曲名被裁到错误区域（悬浮条没有变换，所以那里看不出问题）。
+            arc.math.geom.Vec2 stagePos = localToStageCoordinates(new arc.math.geom.Vec2(0f, 0f));
+            boolean clipped = ScissorStack.push(new Rect(stagePos.x, stagePos.y, cw, this.height));
             try {
                 this.x = ox - ph;
                 super.draw();
@@ -577,7 +583,7 @@ public class MusicBar {
             @Override
             public void touchDragged(InputEvent e, float x, float y, int pointer) {
                 float dx = e.stageX - lastX, dy = e.stageY - lastY;
-                if (dx != 0f || dy != 0f) dragged = true;
+                // 只有「累计位移超过阈值」才算拖动：原先任意 1px 抖动就置 dragged，导致 5px 点击阈值永远不成立、
                 moveBar(dx, dy);
                 lastX = e.stageX;
                 lastY = e.stageY;

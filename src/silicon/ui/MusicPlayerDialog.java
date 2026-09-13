@@ -683,7 +683,7 @@ public class MusicPlayerDialog extends BaseDialog {
 
     private void removeTrack(int idx) {
         MusicTrack t = MusicPlayer.trackAt(idx);
-        String name = t == null ? "" : t.name;
+        String name = (t == null || t.name == null) ? "" : t.name; // 反序列化出来的 track 可能 name 为 null
         BaseDialog dlg = new BaseDialog(Core.bundle.get("musicplayer.confirm"));
         String q = "确定删除?";
         try { String v = Core.bundle.get("musicplayer.deleteConfirm"); if (v != null && !v.contains("??")) q = v; } catch (Exception ignored) {}

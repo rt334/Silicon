@@ -257,6 +257,10 @@ public class MusicPlayer {
     /** 专辑：一组曲目（存放曲目 cacheHash 引用），可按专辑整体播放 */
     public static final int MAX_ALBUM_NAME_LENGTH = 24;
     public static final int MAX_TRACK_NAME_LENGTH = 64;
+    /** 曲目库容量上限（防远程对端通过 mp-sync 无界往设置里塞曲目） */
+    public static final int MAX_TRACKS = 512;
+    /** 单个来源字符串（URL/路径）长度上限 */
+    public static final int MAX_SOURCE_LENGTH = 2048;
     public static class Album {
         public String name;
         public Seq<String> hashes = new Seq<>();
@@ -1143,6 +1147,16 @@ public class MusicPlayer {
             return null;
         }
         String hash = Strings.bytesToHex(sha256(src)).substring(0, 16);
+        // 曲库容量/来源长度上限：曲目库是持久化设置项，且远程对端可以（经 mp-sync）触发 addTrack，
+        // 不封顶时刷不同 URL 就能无界增长每个客户端的设置（并拖慢每次列表重建）。
+        if (tracks.size >= MAX_TRACKS) {
+            SiliconLog.log("Track library full (" + MAX_TRACKS + "), reject: " + src);
+            return null;
+        }
+        if (src.length() > MAX_SOURCE_LENGTH) {
+            SiliconLog.log("Track source too long (" + src.length() + "), reject");
+            return null;
+        }
         int dup = indexOfHash(hash);
         if (dup >= 0) {
             MusicTrack existed = tracks.get(dup);
@@ -2027,12 +2041,13 @@ public class MusicPlayer {
     }
 
     public static void next() {
-        if (!enabled || tracks.size == 0) return;
+        // 不再被 enabled 门控：总开关只管网络收发，本地切歌应当照常可用（与 play/resume 语义一致）
+        if (tracks.size == 0) return;
         if (advanceSafely(1)) bcast("next");
     }
 
     public static void prev() {
-        if (!enabled || tracks.size == 0) return;
+        if (tracks.size == 0) return;
         if (advanceSafely(-1)) bcast("next");
     }
 
@@ -2109,6 +2124,8 @@ public class MusicPlayer {
             try (InputStream in = src.read(); OutputStream os = out.write(false)) {
                 Streams.copy(in, os);
             }
+            // 拷贝也会撑大缓存：抄完立刻按预算淘汰（此前只有分块收齐/URL 写入两条路径会淘汰）
+            enforceCacheBudget();
             hashExt.put(t.cacheHash, e);
             return out.exists() ? out : null;
         } catch (Exception e) {
@@ -2247,7 +2264,11 @@ public class MusicPlayer {
      *  其次用已登记扩展名，最后兜底 .ogg */
     private static String resolveExt(String hash) {
         if (hash == null || hash.isEmpty()) return null;
-        // 磁盘扫描优先：若缓存目录存在 <hash>.<真实ext>，以磁盘为准（URL 内容格式可能与 URL 扩展名不一致）
+        // 已知扩展名直接返回，**不要**每次扫目录：本方法在 trackLength() 里被调用，而悬浮条/弹窗的
+        // 进度条 update() 每帧都会问一次时长 → URL 曲目播放时等于每帧列一遍缓存目录（最多 512 个 Fi 分配）。
+        // 只有「登记表里没有」时才需要按磁盘事实纠正一次（URL 内容格式可能与 URL 扩展名不一致）。
+        String known = hashExt.get(hash);
+        if (known != null) return known;
         try {
             Fi dir = cacheRoot();
             if (dir != null && dir.isDirectory()) {
@@ -2263,8 +2284,6 @@ public class MusicPlayer {
             }
         } catch (Exception ignored) {
         }
-        String known = hashExt.get(hash);
-        if (known != null) return known;
         hashExt.put(hash, ".ogg");
         return ".ogg";
     }
