@@ -76,9 +76,9 @@ public class MusicNetwork {
     // 磁盘写爆与越界写文件。
     // ------------------------------------------------------------------
 
-    /** hash 唯一合法形态：SHA-256 前 16 位小写十六进制（与 MusicTrack.cacheHash 一致）。
+    /** hash 唯一合法形态：SHA-256 前 16 位十六进制（大小写均可——实测本机生成的是大写，若只收小写会把自己/联机分块全拦掉）。
      *  严格白名单同时挡住路径穿越（`..`/分隔符）与任意扩展名写入。 */
-    private static final java.util.regex.Pattern HASH_PATTERN = java.util.regex.Pattern.compile("^[0-9a-f]{16}$");
+    private static final java.util.regex.Pattern HASH_PATTERN = java.util.regex.Pattern.compile("^[0-9a-fA-F]{16}$");
     /** 分块数上限：24KB × 4096 ≈ 96MB；用于阻断 chunkCount=Integer.MAX_VALUE 造成的巨型数组分配 */
     private static final int MAX_CHUNK_COUNT = 4096;
     /** 单曲接收字节上限（64MB） */

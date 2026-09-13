@@ -153,7 +153,8 @@ public class AudioTranscoder {
             postFail(onFail, "invalid source");
             return;
         }
-        Fi out = MusicPlayer.wavCacheFile(hash);
+        // 必须与 MusicPlayer.transcodedWav 使用同一命名：<hash>.wav
+        Fi out = MusicPlayer.wavCacheFile(hash + ".wav");
         if (out == null) {
             postFail(onFail, "no cache dir");
             return;
@@ -172,6 +173,7 @@ public class AudioTranscoder {
         }
         progress.put(hash, -1f);
         pool.submit(() -> {
+            Log.info("[Music] transcode worker start hash=" + hash + " src=" + src.absolutePath());
             Process p = null;
             try {
                 Fi tmp = MusicPlayer.wavCacheFile(hash + ".part");
@@ -192,6 +194,7 @@ public class AudioTranscoder {
                 } catch (Exception e) {
                     Log.warn("[SiliconMusic] internal decode error: " + e.getMessage());
                 }
+                Log.info("[Music] internal decode result=" + done + " hash=" + hash);
                 if (!done && silicon.audio.decode.InternalDecoders.lastError() != null) {
                     Log.warn("[SiliconMusic] internal decode failed: " + silicon.audio.decode.InternalDecoders.lastError());
                 }
@@ -235,6 +238,7 @@ public class AudioTranscoder {
                 if (!tmp.exists() || tmp.length() <= 44) throw new IllegalStateException("empty output");
                 if (out.exists()) out.delete();
                 tmp.moveTo(out);
+                Log.info("[Music] transcode done hash=" + hash + " bytes=" + out.length());
                 progress.remove(hash);
                 queued.remove(hash);
                 running.remove(hash);

@@ -266,6 +266,17 @@ public class MusicPlayer {
     private static float pausedLength = -1f;
     /** 已解析文件绝对路径 → 时长（秒）缓存，避免反复用 Music.create 读取耗时 */
     private static final ObjectMap<String, Float> lengthCache = new ObjectMap<>();
+    /** 转码失败的曲目 hash：避免每次播放都重试（直接退回原生播放或提示） */
+    private static final arc.struct.ObjectSet<String> transcodeFailed = new arc.struct.ObjectSet<>();
+
+    /** SoLoud 在**当前游戏版本**确实能播的格式。
+     *  注意 flac 不在其中：SoLoud 20260903 已无 flac 解码器（实测 Music.create 直接失败），
+     *  flac 必须走内置 jFLAC 解码。 */
+    private static boolean isNativePlayable(String path) {
+        if (path == null) return false;
+        String p = path.toLowerCase();
+        return p.endsWith(".mp3") || p.endsWith(".ogg") || p.endsWith(".wav");
+    }
     private static boolean autoAdvancing = false;
     /** 最近一次 seek 的游戏内时间（秒）；seek 后给 Soloud 一段恢复期，防止流式声源跳转瞬间被误判为「已播完」而跳歌 */
     private static float lastSeekAt = -1000f;
@@ -1101,23 +1112,61 @@ public class MusicPlayer {
             // 需要「精确拖动」的格式（mp3/flac/以及 Soloud 根本不支持的 m4a/aac/wma…）：
             // 有 FFmpeg 时统一转成 WAV 再播——WAV 采样级 seek，拖动立刻精确；
             // 没有 FFmpeg 则退回原有行为（能播的照播，不能播的给出明确提示）。
-            if (needsTranscode(file)) {
+            if (needsTranscode(file) && !transcodeFailed.contains(t.cacheHash)) {
                 Fi wav = transcodedWav(t.cacheHash);
+                Log.info("[Music] play idx=" + index + " name=" + t.name + " hash=" + t.cacheHash
+                        + " src=" + file.name() + " cachedWav=" + (wav != null));
                 if (wav != null) {
                     file = wav;
                 } else if (AudioTranscoder.canHandle(file)) {
                     final int target = index;
                     final String hash = t.cacheHash;
-                    final Fi src = file;
+                    final Fi srcFile = file; // lambda 捕获需 final
+                    // 优先用「原始文件」解码：缓存副本可能是旧版本留下的坏拷贝（实测旧版 flac 副本无法加载）
+                    Fi decodeSrc = file;
+                    if (t.isLocal()) {
+                        Fi orig = originalLocalFile(t);
+                        if (orig != null && orig.exists() && orig.length() > 0) decodeSrc = orig;
+                    }
+                    final Fi src = decodeSrc;
+                    Log.info("[Music] transcode request hash=" + hash + " from=" + src.absolutePath());
                     toast("musicplayer.transcoding", t.name);
                     AudioTranscoder.request(src, hash, () -> {
+                        Log.info("[Music] transcode ready idx=" + target + " hash=" + hash);
+                        if (transcodedWav(hash) == null) {
+                            // 防死循环：报就绪但产物不存在（如命名不一致）时标记失败并提示，不再反复请求
+                            Log.warn("[Music] transcode reported ready but wav missing: " + hash);
+                            transcodeFailed.add(hash);
+                            toast("musicplayer.transcodeFail", t.name);
+                            return;
+                        }
                         if (current == target && !playing) {
                             beginPlayback(target);
                             if (playing) bcast("play");
                         }
-                    }, msg -> toast("musicplayer.transcodeFail", t.name));
+                    }, msg -> {
+                        Log.warn("[Music] transcode failed hash=" + hash + " : " + msg);
+                        transcodeFailed.add(hash);
+                        if (isNativePlayable(srcFile.absolutePath())) {
+                            // 内置解码失败但 SoLoud 能放（mp3/ogg/wav）→ 退回原生播放（拖动精度次之，先能听）
+                            Log.info("[Music] fallback to native playback for " + srcFile.name());
+                            beginPlayback(target);
+                        } else {
+                            toast("musicplayer.transcodeFail", t.name);
+                        }
+                    });
                     return;
+                } else {
+                    Log.warn("[Music] no decoder available for " + file.name());
                 }
+            }
+            // 转码已确认失败：对 flac 这类 SoLoud 根本不能播的格式，别再掉进全量加载（会白读整个文件再报错）
+            if (transcodeFailed.contains(t.cacheHash) && !isNativePlayable(file.absolutePath())) {
+                Log.warn("[Music] transcode failed earlier, skip Soloud playback for " + file.name());
+                playing = false;
+                localVoiceId = -1;
+                toast("musicplayer.transcodeFail", t.name);
+                return;
             }
             if (!isDecodablePath(file.absolutePath())) {
                 Log.warn("Blocked play of undecodable " + t.name + " (Soloud decodes ogg/mp3/wav/flac; configure FFmpeg for more)");
@@ -2120,6 +2169,14 @@ public class MusicPlayer {
                     final float oy = ownerY;
                     AudioTranscoder.request(file, hash, () -> playRemoteVoice(ownerUuid, rh, ox, oy), null);
                 }
+                return;
+            }
+            // 转码已确认失败：对 flac 这类 SoLoud 根本不能播的格式，别再掉进全量加载（会白读整个文件再报错）
+            if (transcodeFailed.contains(t.cacheHash) && !isNativePlayable(file.absolutePath())) {
+                Log.warn("[Music] transcode failed earlier, skip Soloud playback for " + file.name());
+                playing = false;
+                localVoiceId = -1;
+                toast("musicplayer.transcodeFail", t.name);
                 return;
             }
             if (!isDecodablePath(file.absolutePath())) {
