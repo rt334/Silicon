@@ -193,9 +193,11 @@ public class AudioTranscoder {
         }
         if (out.exists() && out.length() > 44) {
             // 已有缓存：体积超上限的长曲先压回预算内再交给播放（旧版本缓存下来的 44 分钟 m4a 有 471MB，
-            // 会顶满 512MB 缓存预算、并整块读进 SoLoud 内存）。正在播放的那首不碰，避免重写它正在读的文件。
+            // 缓存预算只有 512MB，两首长曲就会把其它曲目挤出去）。仅在「当前没有声源在流式读取这个文件」时做，
+            // 避免重写正在播放的文件——所以判断的是「正在播放的曲目 == 该 hash」，而不是「当前曲目 == 该 hash」。
             silicon.audio.MusicTrack cur = MusicPlayer.currentTrack();
-            boolean inUse = cur != null && hash.equalsIgnoreCase(cur.cacheHash);
+            boolean inUse = MusicPlayer.isPlaying() && MusicPlayer.currentVoiceId() >= 0
+                    && cur != null && hash.equalsIgnoreCase(cur.cacheHash);
             if (!inUse && out.length() > WavDownsampler.MAX_BYTES && queued.putIfAbsent(hash, Boolean.TRUE) == null) {
                 progress.put(hash, -1f);
                 pool.submit(() -> {
@@ -288,7 +290,7 @@ public class AudioTranscoder {
 
                 if (!tmp.exists() || tmp.length() <= 44) throw new IllegalStateException("empty output");
                 // 超长曲目降采样：PCM 体积 = 秒 × 采样率 × 声道 × 2，44 分钟的 44.1k 立体声有 471MB，
-                // 既顶满缓存预算又会整块进内存。超过上限就按 WavDownsampler 的策略压回来（可能是 1/4）。
+                // 会长期占满 512MB 缓存预算（把别的曲目挤出去）。超过上限就按 WavDownsampler 的策略压回来。
                 WavDownsampler.Result shrink = WavDownsampler.shrinkIfNeeded(tmp.file(), WavDownsampler.MAX_BYTES);
                 if (shrink.changed) {
                     Log.info("[Music] long track downsample hash=" + hash + " " + shrink.text);
