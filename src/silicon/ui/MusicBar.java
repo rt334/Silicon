@@ -36,8 +36,20 @@ import silicon.audio.MusicTrack;
  */
 public class MusicBar {
     private static final String CFG_X = "musicbar.pos.x";
-    private static final String CFG_Y = "musicbar.pos.y";
+    /** 左上角锚点的「上边缘」坐标（阶段3 改为以左上角为基准；旧 CFG_Y_LEGACY 是左下角，仅用于一次性迁移） */
+    private static final String CFG_TOP = "musicbar.pos.top";
+    private static final String CFG_Y_LEGACY = "musicbar.pos.y";
     private static final String CFG_COLLAPSED = "musicbar.collapsed";
+    /** 面板内边距（未缩放单位，与 Table.margin 一致） */
+    private static final float BAR_MARGIN = 4f;
+    /** 收起态按钮边长（Scl 单位）——面板尺寸必须 = 按钮 + 两侧 margin，否则按钮会溢出面板背景 */
+    private static final float COLLAPSED_BTN = 40f;
+    /** 展开态面板宽度（Scl 单位）：曲名/进度行以 growX 铺满，长曲名在固定宽内滚动裁剪 */
+    private static final float EXPANDED_WIDTH = 600f;
+    /** 默认位置：贴左边缘（Scl 单位） */
+    private static final float DEFAULT_LEFT = 8f;
+    /** 默认位置：屏幕高度比例（≈ 用户当前所在位置，见 settings: pos.y=1147 于 1440 高、uiscale 150%） */
+    private static final float DEFAULT_TOP_FRAC = 0.85f;
     private static Table bar;
     private static boolean collapsed = true;
 
@@ -71,9 +83,10 @@ public class MusicBar {
 
     private static void build() {
         bar = new Table();
-        // 悬浮条美观：深灰面板+8px圆角外边距，半透明但对比度更高，适配亮/暗地图
+        // 悬浮条美观：深灰面板+外边距（grayPanel 是纯色 region，会精确铺满元素范围，
+        // 因此「背景不能完全覆盖」只可能是元素被强行设得比内容小——两处尺寸都按下文修正）
         bar.background(Styles.grayPanel);
-        bar.margin(4f);
+        bar.margin(BAR_MARGIN);
 
         if (collapsed) {
             // 收起态：播放中显示暂停、暂停中显示播放，颜色随状态高亮，悬停显示曲名
@@ -87,31 +100,40 @@ public class MusicBar {
                 String cur = MusicPlayer.currentTrack() == null ? "none" : MusicPlayer.currentTrack().name;
                 t.background(Styles.black6).margin(4f).add(cur.replace("[", "[[").replace("]", "]]"));
             }));
-            bar.add(btn).size(Scl.scl(44f));
+            bar.add(btn).size(Scl.scl(COLLAPSED_BTN));
             makeDraggable(btn, () -> {
                 collapsed = false;
                 Core.settings.put(CFG_COLLAPSED, false);
                 detach();
             });
             bar.pack();
+            // 正方形面板：尺寸 = 按钮 + 两侧 margin。旧实现固定 44f（= 按钮边长），按钮比面板大 8f，
+            // 于是图标/按钮背景从面板四边各溢出 4f——「收起后背景不正常」。
+            float side = Scl.scl(COLLAPSED_BTN) + BAR_MARGIN * 2f;
+            bar.setSize(side, side);
         } else {
-            // 展开态：紧凑图标控制排 + 曲名 + 进度条；拖动把手移动整条
+            // 展开态：整条 = 单列三行（按钮排 / 曲名+时间 / 进度条）。
+            // 关键：每行都必须自己铺满整条宽度。旧实现把 11 个按钮直接排成 11 列，
+            // 下面两行用 colspan(11) 去跨这些列，于是行宽被「按钮列宽之和」限制（≈516dp），
+            // 而曲名行内容需要 ≈580dp（曲名 476 + 时间 96）→ 内容横向溢出面板右沿，
+            // 表现为「背景不能完全覆盖」。改为按钮先装进子表，三行各自 growX，面板即精确覆盖内容。
+            Table controls = new Table();
             ImageButton grip = new ImageButton(Icon.move, Styles.flati);
             grip.resizeImage(Scl.scl(20f));
             grip.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("拖动移动")) );
-            bar.add(grip).size(Scl.scl(32f)).pad(1f);
+            controls.add(grip).size(Scl.scl(32f)).pad(1f);
             makeDraggable(grip);
             ImageButton prevBtn = new ImageButton(Icon.leftOpen, Styles.cleari);
             prevBtn.resizeImage(Scl.scl(18f));
             prevBtn.clicked(MusicPlayer::prev);
             prevBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("上一曲")));
-            bar.add(prevBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(prevBtn).size(Scl.scl(32f)).pad(1f);
             // 快退（相对 -10s）
             ImageButton rewindBtn = new ImageButton(Icon.leftSmall, Styles.cleari);
             rewindBtn.resizeImage(Scl.scl(18f));
             rewindBtn.clicked(() -> MusicPlayer.seekRelative(-10f));
             rewindBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("快退10秒")));
-            bar.add(rewindBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(rewindBtn).size(Scl.scl(32f)).pad(1f);
 
             // 播放/暂停
             ImageButton play = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.flati);
@@ -125,19 +147,19 @@ public class MusicBar {
             });
             // 每帧同步图标到当前播放态（兜底异步建源/暂停/停止路径，悬浮窗停止/开始按钮切换修复）
             playButtonFrameSync(play);
-            bar.add(play).size(Scl.scl(40f)).pad(1f);
+            controls.add(play).size(Scl.scl(40f)).pad(1f);
 
             // 快进（相对 +10s）
             ImageButton forwardBtn = new ImageButton(Icon.rightSmall, Styles.cleari);
             forwardBtn.resizeImage(Scl.scl(18f));
             forwardBtn.clicked(() -> MusicPlayer.seekRelative(10f));
             forwardBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("快进10秒")));
-            bar.add(forwardBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(forwardBtn).size(Scl.scl(32f)).pad(1f);
             ImageButton nextBtn = new ImageButton(Icon.rightOpen, Styles.cleari);
             nextBtn.resizeImage(Scl.scl(18f));
             nextBtn.clicked(MusicPlayer::next);
             nextBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("下一曲")));
-            bar.add(nextBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(nextBtn).size(Scl.scl(32f)).pad(1f);
 
             // 倍速快捷循环按钮（覆盖 1/16–16x 对数档的常用子集）：0.25 / 0.5 / 1 / 1.5 / 2 / 4 / 8；固定宽度完整显示
             final float[] speeds = {0.25f, 0.5f, 1f, 1.5f, 2f, 4f, 8f};
@@ -159,7 +181,7 @@ public class MusicBar {
                 MusicPlayer.setSpeed(next);
                 speedBtn.setText(speedLabel());
             });
-            bar.add(speedBtn).width(Scl.scl(76f)).height(Scl.scl(30f)).pad(1f);
+            controls.add(speedBtn).width(Scl.scl(76f)).height(Scl.scl(30f)).pad(1f);
 
             // 专辑作用域切换按钮：点按在「全部曲目」与各专辑间轮换；长按/双击由设置页管理
             TextButton albumBtn = new TextButton(albumScopeLabel(), Styles.flatBordert);
@@ -178,7 +200,7 @@ public class MusicBar {
                 lastScope[0] = albumScopeLabel();
                 albumBtn.setText(lastScope[0]);
             });
-            bar.add(albumBtn).width(Scl.scl(112f)).height(Scl.scl(30f)).pad(1f);
+            controls.add(albumBtn).width(Scl.scl(112f)).height(Scl.scl(30f)).pad(1f);
 
             // 循环模式快捷按钮：点击在 6 种模式间循环。固定宽度（不等长文本切换不导致按钮忽大忽小/点小/换行），
             // 文案已改为等长的两字中文（关闭/列表/单曲/乱序/单停/随机），配合字号在固定格内完整显示不省略
@@ -198,22 +220,23 @@ public class MusicBar {
                 lastLoop[0] = loopModeLabel();
                 loopBtn.setText(lastLoop[0]);
             });
-            bar.add(loopBtn).width(Scl.scl(64f)).height(Scl.scl(30f)).pad(1f);
+            controls.add(loopBtn).width(Scl.scl(64f)).height(Scl.scl(30f)).pad(1f);
 
             // 设置按钮：打开音乐播放器设置页
             ImageButton settingsBtn = new ImageButton(Icon.settings, Styles.cleari);
             settingsBtn.resizeImage(Scl.scl(18f));
             settingsBtn.clicked(MusicPlayerDialog::open);
             settingsBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("设置")));
-            bar.add(settingsBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(settingsBtn).size(Scl.scl(32f)).pad(1f);
 
             // 收起（最小值化）
             ImageButton collapseBtn = new ImageButton(Icon.down, Styles.cleari);
             collapseBtn.resizeImage(Scl.scl(18f));
             collapseBtn.clicked(() -> { collapsed = true; Core.settings.put(CFG_COLLAPSED, true); detach(); });
             collapseBtn.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("收起")));
-            bar.add(collapseBtn).size(Scl.scl(32f)).pad(1f);
+            controls.add(collapseBtn).size(Scl.scl(32f)).pad(1f);
 
+            bar.add(controls).growX().padBottom(2f);
             bar.row();
             // 曲名 + 当前/总时长：内嵌横向 Table，growX 铺满整条固定宽度 → 长曲名在条内滚动裁剪、不拉长整条
             Table infoRow = new Table();
@@ -246,32 +269,48 @@ public class MusicBar {
             });
             infoRow.add(timeLbl).padLeft(8f).width(Scl.scl(96f)).right();
             // 行高给足（44f 彻底避免上半部被裁），配合 MarqueeLabel 垂直居中
-            bar.add(infoRow).growX().pad(2f, 6f, 2f, 6f).colspan(11).left().height(Scl.scl(44f));
+            bar.add(infoRow).growX().pad(2f, 6f, 2f, 6f).left().height(Scl.scl(44f));
 
             bar.row();
             // 进度条（独立一行，加高并上下留白，避免滑杆圆钮越界遮挡上方曲名/按钮文字）
-            bar.add(previewSlider).growX().height(Scl.scl(24f)).colspan(11).pad(3f, 6f, 3f, 6f);
-            // 展开态多了一行 → 需要多 rebuild 一次，交给 update 的空重建逻辑
+            bar.add(previewSlider).growX().height(Scl.scl(24f)).pad(3f, 6f, 3f, 6f);
         }
 
         bar.pack();
-        if (collapsed) {
-            // 收起态固定窄宽
-            bar.setSize(Scl.scl(44f), bar.getPrefHeight());
-        } else {
-            // 展开态固定整条宽度：曲名/进度行以 colspan 铺满，长曲名在此固定宽内滚动裁剪，
-            // 不再随内容 pack 伸缩导致「歌名过长不循环而直接超出条右沿」
-            bar.setSize(Scl.scl(600f), bar.getPrefHeight());
+        if (!collapsed) {
+            // 展开态固定整条宽度：曲名/进度行以 growX 铺满，长曲名在此固定宽内滚动裁剪，
+            // 不再随内容 pack 伸缩导致「歌名过长不直接超出条右沿」；同时不小于内容所需的 pref 宽
+            bar.setSize(Math.max(Scl.scl(EXPANDED_WIDTH), bar.getPrefWidth()), bar.getPrefHeight());
         }
-
-        // 位置：优先记忆拖拽位置；首次使用则取默认右下角
-        float x = Core.settings.has(CFG_X) ? Core.settings.getFloat(CFG_X) : Core.graphics.getWidth() - bar.getWidth() - Scl.scl(10f);
-        float y = Core.settings.has(CFG_Y) ? Core.settings.getFloat(CFG_Y) : Scl.scl(16f);
-        bar.setPosition(x, y);
-        // 屏幕尺寸变化后夹取在可视范围内（重置位置后/窗口缩放后不至于把条夹到屏幕外导致长度观感异常）
-        moveBar(0f, 0f);
-
+        applyStoredPosition();
         Core.scene.root.addChild(bar);
+    }
+
+    /**
+     * 位置以**左上角**为锚点：{@code bar.x} = 左边缘，存储的 top = 上边缘（场景 y 向上，故 bar.y = top - height）。
+     * 这样收起/展开切换时左上角不动，按钮不会因为高度变化而“跳”。
+     * <p>
+     * 迁移：旧版本存的是左下角 y，检测到旧键就保留其垂直位置并把 x 贴到左边缘（一次性迁移后删除旧键）。
+     * 首次使用（两个键都没有）则用默认值：贴左边缘 + 屏幕高度 {@link #DEFAULT_TOP_FRAC} 处。
+     */
+    private static void applyStoredPosition() {
+        float left;
+        float top;
+        if (Core.settings.has(CFG_TOP)) {
+            left = Core.settings.has(CFG_X) ? Core.settings.getFloat(CFG_X) : Scl.scl(DEFAULT_LEFT);
+            top = Core.settings.getFloat(CFG_TOP);
+        } else if (Core.settings.has(CFG_Y_LEGACY)) {
+            left = Scl.scl(DEFAULT_LEFT);
+            top = Core.settings.getFloat(CFG_Y_LEGACY) + bar.getHeight();
+            Core.settings.remove(CFG_Y_LEGACY);
+            Core.settings.put(CFG_X, left);
+            Core.settings.put(CFG_TOP, top);
+        } else {
+            left = Scl.scl(DEFAULT_LEFT);
+            top = Core.graphics.getHeight() * DEFAULT_TOP_FRAC;
+        }
+        bar.setPosition(left, top - bar.getHeight());
+        clampBar();
     }
 
     /** 紧凑图标按钮（悬浮条用）：返回并以 Cell.pad 收尾以便链式调整间距 */
@@ -479,8 +518,7 @@ public class MusicBar {
             @Override
             public void touchUp(InputEvent e, float x, float y, int pointer, arc.input.KeyCode button) {
                 if (bar == null) return;
-                Core.settings.put(CFG_X, bar.x);
-                Core.settings.put(CFG_Y, bar.y);
+                savePosition();
                 // 未拖动（位移小于阈值）才视为单击
                 if (!dragged && Math.abs(e.stageX - startX) < Scl.scl(5f) && Math.abs(e.stageY - startY) < Scl.scl(5f)) {
                     onClick.run();
@@ -511,18 +549,36 @@ public class MusicBar {
             @Override
             public void touchUp(InputEvent e, float x, float y, int pointer, arc.input.KeyCode button) {
                 if (bar == null) return;
-                Core.settings.put(CFG_X, bar.x);
-                Core.settings.put(CFG_Y, bar.y);
+                savePosition();
             }
         });
     }
 
-    /** 移动控制条并夹取在屏幕内，保证至少部分可见、不会被拖出屏幕外 */
+    /** 拖动即移动「左上角」；夹取保证整条（含收起态按钮）始终完整留在屏幕内 */
     private static void moveBar(float dx, float dy) {
         if (bar == null) return;
-        float w = Core.graphics.getWidth(), h = Core.graphics.getHeight();
-        bar.x = Mathf.clamp(bar.x + dx, -bar.getWidth() + Scl.scl(20f), w - Scl.scl(20f));
-        bar.y = Mathf.clamp(bar.y + dy, Scl.scl(16f), h - Scl.scl(16f));
+        bar.x += dx;
+        bar.y += dy;
+        clampBar();
+    }
+
+    /** 以左上角为基准夹取：x ∈ [m, w-width-m]，top ∈ [m+height, h-m]（场景 y 向上） */
+    private static void clampBar() {
+        if (bar == null) return;
+        float m = Scl.scl(2f);
+        float maxX = Math.max(m, Core.graphics.getWidth() - bar.getWidth() - m);
+        bar.x = Mathf.clamp(bar.x, m, maxX);
+        float minTop = m + bar.getHeight();
+        float maxTop = Math.max(minTop, Core.graphics.getHeight() - m);
+        float top = Mathf.clamp(bar.y + bar.getHeight(), minTop, maxTop);
+        bar.y = top - bar.getHeight();
+    }
+
+    /** 持久化当前位置（左上角锚点：x + 上边缘） */
+    private static void savePosition() {
+        if (bar == null) return;
+        Core.settings.put(CFG_X, bar.x);
+        Core.settings.put(CFG_TOP, bar.y + bar.getHeight());
     }
 
     /** 移除当前控制条：下次 update 依据 collapsed 重建 */
@@ -532,10 +588,11 @@ public class MusicBar {
         bar = null;
     }
 
-    /** 重置悬浮条位置到默认右下角（清除记忆位置设置） */
+    /** 重置悬浮条位置到默认：贴左边缘 + 屏幕高度 {@link #DEFAULT_TOP_FRAC} 处（清除记忆位置设置） */
     public static void resetPosition() {
         Core.settings.remove(CFG_X);
-        Core.settings.remove(CFG_Y);
+        Core.settings.remove(CFG_TOP);
+        Core.settings.remove(CFG_Y_LEGACY);
         if (bar != null) {
             bar.remove();
             bar = null;

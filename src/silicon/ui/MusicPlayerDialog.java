@@ -57,6 +57,10 @@ public class MusicPlayerDialog extends BaseDialog {
     private void rebuild() {
         cont.clearChildren();
         cont.top();
+        // 内容区铺实体底色：defaultDialog 的背景是 Tex.windowEmpty（只画边框、中间不铺底），
+        // 各内部面板之间/之外的空白就会透出游戏画面——即「背景不能完全覆盖」。
+        // 这里按其他面板同色系铺满内容区，保证弹窗范围内不露底。
+        cont.background(Styles.grayPanel);
 
         // —— 顶部「现在播放」面板（实时刷新：状态/曲名随播放变化自动更新） ——
         cont.table(now -> {
@@ -321,6 +325,8 @@ public class MusicPlayerDialog extends BaseDialog {
         }).growX().padTop(2f).row();
 
         // —— 底部：循环模式 / 倒放 / 停止 / 添加曲目（图标点缀提升可识别性） ——
+        // 四个按钮统一「格式」：flatBordert + 同一字号（不加 setFontScale，与停止/添加曲目一致）
+        // + 同一高度/间距 + 关闭换行与省略号。此前循环/倒放单独设了 0.9 字号，文字明显比停止/添加曲目小。
         cont.table(bottom -> {
             arc.scene.ui.Image botIcon = new arc.scene.ui.Image(Icon.music);
             botIcon.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("播放控制")));
@@ -328,7 +334,6 @@ public class MusicPlayerDialog extends BaseDialog {
             TextButton loop = new TextButton(loopModeText(), Styles.flatBordert);
             loop.getLabel().setWrap(false);
             loop.getLabel().setEllipsis(false);
-            loop.getLabel().setFontScale(Scl.scl(0.9f));
             loop.clicked(() -> {
                 MusicPlayer.cycleLoopMode();
                 loop.setText(loopModeText());
@@ -339,17 +344,24 @@ public class MusicPlayerDialog extends BaseDialog {
 
             TextButton rev = new TextButton(Core.bundle.get("musicplayer.reverse"), Styles.flatBordert);
             rev.getLabel().setWrap(false);
-            rev.getLabel().setFontScale(Scl.scl(0.9f));
+            rev.getLabel().setEllipsis(false);
             final TextButton revF = rev;
             revF.update(() -> revF.getLabel().setColor(MusicPlayer.isReverse() ? Pal.accent : Color.white));
             revF.clicked(() -> MusicPlayer.toggleReverse());
             bottom.add(rev).width(Scl.scl(84f)).height(Scl.scl(34f)).pad(2f);
 
             // 停止/添加曲目也显式固定宽度，与上述按钮一致——不用 growX()（会随 rebuild/pref 波动导致抖动）
-            bottom.button(Core.bundle.get("musicplayer.stop"), Styles.flatBordert, MusicPlayer::stop)
-                    .width(Scl.scl(96f)).height(Scl.scl(34f)).pad(2f);
-            bottom.button(Core.bundle.get("musicplayer.addTrack"), Styles.flatBordert, this::showAddDialog)
-                    .width(Scl.scl(112f)).height(Scl.scl(34f)).pad(2f);
+            TextButton stop = new TextButton(Core.bundle.get("musicplayer.stop"), Styles.flatBordert);
+            stop.getLabel().setWrap(false);
+            stop.getLabel().setEllipsis(false);
+            stop.clicked(MusicPlayer::stop);
+            bottom.add(stop).width(Scl.scl(96f)).height(Scl.scl(34f)).pad(2f);
+
+            TextButton add = new TextButton(Core.bundle.get("musicplayer.addTrack"), Styles.flatBordert);
+            add.getLabel().setWrap(false);
+            add.getLabel().setEllipsis(false);
+            add.clicked(this::showAddDialog);
+            bottom.add(add).width(Scl.scl(112f)).height(Scl.scl(34f)).pad(2f);
         }).growX().padTop(2f).row();
 
         // —— 更多设置：播放给他人 + 启用开关 + 悬浮条复位（紧凑面板，尽量缩小留白） ——
