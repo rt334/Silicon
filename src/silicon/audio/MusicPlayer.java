@@ -142,6 +142,17 @@ public class MusicPlayer {
         }
     }
 
+    /** 当前曲目正在解码（转码）时返回本地化进度文本，否则 null。UI（悬浮条/弹窗）用它替代时间显示。 */
+    public static String decodeProgressText() {
+        MusicTrack t = currentTrack();
+        if (t == null || t.cacheHash == null) return null;
+        if (!AudioTranscoder.isTranscoding(t.cacheHash)) return null;
+        float p = AudioTranscoder.transcodeProgress(t.cacheHash);
+        return p >= 0f
+                ? Core.bundle.format("musicplayer.decodingPercent", (int) (p * 100f))
+                : Core.bundle.get("musicplayer.decoding");
+    }
+
     /** 按 hash 查曲目时长（秒）；未知返回 -1。转码进度换算用。 */
     public static float trackLengthSeconds(String hash) {
         if (hash == null) return -1f;

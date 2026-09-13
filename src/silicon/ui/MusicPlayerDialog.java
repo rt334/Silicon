@@ -136,7 +136,8 @@ public class MusicPlayerDialog extends BaseDialog {
                     float cur = seekBar.isDragging() ? seekBar.getValue() * len : MusicPlayer.currentTime();
                     // 抖动修复：仅内容变化时 setText（每帧无条件 setText 会触发整弹窗逐帧重排，
                     // 造成进度条/按钮集体抖动）
-                    String s = formatTime(cur, len);
+                    String s = MusicPlayer.decodeProgressText();
+                    if (s == null) s = formatTime(cur, len);
                     if (!s.equals(time.getText().toString())) time.setText(s);
                     // 抖动修复：非拖动且与上次显示值差异超过阈值才重设，避免每帧原地重设导致指针抖动
                     if (!userSeek[0] && !seekBar.isDragging()) {
@@ -152,7 +153,8 @@ public class MusicPlayerDialog extends BaseDialog {
                     }
                 } else {
                     // 未知/超大时长：显示当前进度 / --:--，与悬浮条文案一致，避免 0:00/0:00 误导
-                    String s = formatTime(MusicPlayer.currentTime(), len);
+                    String s = MusicPlayer.decodeProgressText();
+                    if (s == null) s = formatTime(MusicPlayer.currentTime(), len);
                     if (!s.equals(time.getText().toString())) time.setText(s);
                 }
             });

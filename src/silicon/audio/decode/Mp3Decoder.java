@@ -40,10 +40,12 @@ public class Mp3Decoder implements PcmDecoder {
     }
 
     @Override
-    public long decodeToWav(File src, File outWav) throws Exception {
+    public long decodeToWav(File src, File outWav, java.util.function.IntConsumer onPercent) throws Exception {
         Bitstream bitstream = null;
         WavWriter wav = null;
         long frames = 0;
+        long fileLen = Math.max(1L, src.length());
+        int lastPercent = -1;
         try (InputStream in = new BufferedInputStream(new FileInputStream(src), 1 << 16)) {
             bitstream = new Bitstream(in);
             Decoder decoder = new Decoder();
@@ -65,6 +67,13 @@ public class Mp3Decoder implements PcmDecoder {
                     }
                 }
                 bitstream.closeFrame();
+                if (onPercent != null) {
+                    int p = (int) Math.min(100L, Math.max(0L, bitstream.header_pos()) * 100L / fileLen);
+                    if (p != lastPercent) {
+                        lastPercent = p;
+                        onPercent.accept(p);
+                    }
+                }
             }
             if (wav == null) throw new IOException("no mp3 frames decoded");
         } finally {

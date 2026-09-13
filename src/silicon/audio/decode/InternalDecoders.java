@@ -47,10 +47,15 @@ public class InternalDecoders {
      * @return true=已成功产出 outWav；false=没有匹配的解码器或解码失败（调用方可继续尝试 FFmpeg）
      */
     public static boolean decode(File src, File outWav, String fileName, byte[] head) {
+        return decode(src, outWav, fileName, head, null);
+    }
+
+    /** 带解码进度（0~100，可能回调 -1 表示未知） */
+    public static boolean decode(File src, File outWav, String fileName, byte[] head, java.util.function.IntConsumer onPercent) {
         for (PcmDecoder d : DECODERS) {
             if (!d.accepts(fileName, head)) continue;
             try {
-                long frames = d.decodeToWav(src, outWav);
+                long frames = d.decodeToWav(src, outWav, onPercent);
                 return frames > 0;
             } catch (Exception e) {
                 // 本包刻意不引用 arc（便于用普通 JVM 单测）；失败原因由调用方记录

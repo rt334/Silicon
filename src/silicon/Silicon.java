@@ -404,7 +404,15 @@ public class Silicon extends Mod {
      * 在设置表中插入一个「分类标题」：上方灰色分隔横线 + 强调色分类名（左对齐）。
      * 注册为设置项，rebuild（恢复默认/切换分类）时自动保留。
      */
+    /** 上一个小节完成时刻（用于设置构建耗时诊断） */
+    private static long lastSectionAt = 0L;
+
     private static void addSection(SettingsMenuDialog.SettingsTable st, String labelKey) {
+        long now = System.currentTimeMillis();
+        if (lastSectionAt > 0L) {
+            SiliconLog.info("[Settings] section " + labelKey + " took " + (now - lastSectionAt) + "ms");
+        }
+        lastSectionAt = now;
         st.pref(new CustomSetting(t -> {
             t.image(Tex.whiteui).growX().height(2f).color(Pal.gray).padTop(8f).padBottom(2f);
             t.row();

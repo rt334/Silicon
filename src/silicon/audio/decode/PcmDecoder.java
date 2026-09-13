@@ -19,5 +19,10 @@ public interface PcmDecoder {
      * @return 解码出的采样帧数（每声道计一帧）
      * @throws Exception 不支持 / 数据损坏 / 参数越界（如 24bit FLAC）
      */
-    long decodeToWav(File src, File outWav) throws Exception;
+    long decodeToWav(File src, File outWav, java.util.function.IntConsumer onPercent) throws Exception;
+
+    /** 兼容旧签名（不需要进度时） */
+    default long decodeToWav(File src, File outWav) throws Exception {
+        return decodeToWav(src, outWav, null);
+    }
 }

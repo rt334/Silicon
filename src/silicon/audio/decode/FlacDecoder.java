@@ -39,17 +39,17 @@ public class FlacDecoder implements PcmDecoder {
     }
 
     @Override
-    public long decodeToWav(File src, File outWav) throws Exception {
+    public long decodeToWav(File src, File outWav, java.util.function.IntConsumer onPercent) throws Exception {
         try (InputStream in = new BufferedInputStream(new FileInputStream(src), 1 << 16)) {
             FLACDecoder decoder = new FLACDecoder(in);
-            final State st = new State(outWav);
+            final State st = new State(outWav, onPercent);
             final Exception[] error = new Exception[1];
 
             decoder.addPCMProcessor(new PCMProcessor() {
                 @Override
                 public void processStreamInfo(StreamInfo info) {
                     try {
-                        st.init(info.getSampleRate(), info.getChannels(), info.getBitsPerSample());
+                        st.init(info.getSampleRate(), info.getChannels(), info.getBitsPerSample(), info.getTotalSamples());
                     } catch (Exception e) {
                         error[0] = e;
                     }
@@ -76,6 +76,9 @@ public class FlacDecoder implements PcmDecoder {
     /** 解码状态机：位深转换 + 可选整数倍降采样 + 分块边界处理 */
     private static final class State {
         private final File outWav;
+        private final java.util.function.IntConsumer onPercent;
+        private long totalFrames;
+        private int lastPercent = -1;
         private WavWriter wav;
         private int channels;
         private int bits;
@@ -90,17 +93,19 @@ public class FlacDecoder implements PcmDecoder {
         private final short[] single = new short[1];
         private int sampleIndex;
 
-        State(File out) {
+        State(File out, java.util.function.IntConsumer onPercent) {
             this.outWav = out;
+            this.onPercent = onPercent;
         }
 
-        void init(int rate, int channels, int bits) throws IOException {
+        void init(int rate, int channels, int bits, long totalSamples) throws IOException {
             if (rate <= 0 || channels <= 0 || channels > 8) throw new IOException("bad flac params");
             if (bits != 8 && bits != 16 && bits != 24) throw new IOException("unsupported flac bit depth: " + bits);
             this.channels = channels;
             this.bits = bits;
             this.decimation = decimationFor(rate);
             this.started = true;
+            this.totalFrames = decimation > 1 ? Math.max(1L, totalSamples / decimation) : Math.max(1L, totalSamples);
             this.acc = new short[channels * decimation * 8192];
             this.wav = new WavWriter(outWav, rate / decimation, channels);
         }
@@ -142,6 +147,7 @@ public class FlacDecoder implements PcmDecoder {
                 if (++sampleIndex == channels) {
                     framesWritten++;
                     sampleIndex = 0;
+                    reportProgress();
                 }
                 return;
             }
@@ -165,6 +171,16 @@ public class FlacDecoder implements PcmDecoder {
             wav.writeSamples(out, 0, channels);
             framesWritten++;
             accLen = 0;
+            reportProgress();
+        }
+
+        private void reportProgress() {
+            if (onPercent == null || totalFrames <= 0L) return;
+            int p = (int) Math.min(100L, framesWritten * 100L / totalFrames);
+            if (p != lastPercent) {
+                lastPercent = p;
+                onPercent.accept(p);
+            }
         }
 
         void finish() throws IOException {

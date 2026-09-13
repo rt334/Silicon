@@ -62,8 +62,40 @@ public class AudioTranscoder {
         return p == null ? -1f : p;
     }
 
-    /** 解析可用的 ffmpeg：设置项 → PATH。结果缓存。 */
-    public static synchronized String ffmpegPath() {
+    /** 探测是否正在进行（避免重复排队） */
+    private static volatile boolean probing;
+
+    /**
+     * 解析可用的 ffmpeg：设置项 → PATH。结果缓存。
+     * <p>
+     * **绝不阻塞调用线程**：探测要 spawn 进程（最坏 1.5s×候选数），若在渲染线程上做会直接卡住游戏
+     * （实测「打开设置很慢」一类卡顿）。因此首次调用立即返回 null 并转到后台线程探测，探测完成后
+     * 后续调用即可拿到结果。
+     */
+    public static String ffmpegPath() {
+        String cached = ffmpegPathCached();
+        if (cached != null || available != null) return cached;
+        if (!probing) {
+            probing = true;
+            Thread th = new Thread(() -> {
+                try {
+                    String r = ffmpegPathBlocking();
+                    Log.info("[Music] ffmpeg probe finished: " + (r == null ? "not found" : r));
+                } finally {
+                    probing = false;
+                }
+            }, "silicon-ffmpeg-probe");
+            th.setDaemon(true);
+            th.start();
+        }
+        return null; // 本次未知：调用方按「暂不可用」处理（下次即可拿到结果）
+    }
+
+    private static synchronized String ffmpegPathCached() {
+        return available == null ? null : resolvedPath;
+    }
+
+    private static synchronized String ffmpegPathBlocking() {
         if (available != null) return resolvedPath;
         String configured = null;
         try {
@@ -188,8 +220,8 @@ public class AudioTranscoder {
                     java.io.File tmpFile = tmp.file();
                     byte[] head = silicon.audio.decode.InternalDecoders.readHead(srcFile, 16);
                     if (silicon.audio.decode.InternalDecoders.supports(src.name(), head)) {
-                        progress.put(hash, 0.5f);
-                        done = silicon.audio.decode.InternalDecoders.decode(srcFile, tmpFile, src.name(), head);
+                        done = silicon.audio.decode.InternalDecoders.decode(srcFile, tmpFile, src.name(), head,
+                                pct -> progress.put(hash, Math.max(0f, Math.min(1f, pct / 100f))));
                     }
                 } catch (Exception e) {
                     Log.warn("[SiliconMusic] internal decode error: " + e.getMessage());
