@@ -687,8 +687,8 @@ public class MusicPlayer {
     }
 
     /**
-     * 播放本模组音乐期间，让游戏自带音乐**淡出并保持静音**；本模组停播后立刻放开，
-     * 并让游戏自己挑一首从头播（不保存/恢复原生音乐的进度——用户明确不需要）。
+     * 播放本模组音乐期间，让游戏自带音乐**淡出并保持静音**；本模组停播后停止压制但不主动恢复，
+     * 相当于把原生音乐「打断」——由它自己的间隔+概率判定决定何时再响（不保存/恢复其进度）。
      * <p>
      * 实现要点（v160 的 {@code mindustry.audio.SoundControl}）：
      * <ul>
@@ -699,8 +699,9 @@ public class MusicPlayer {
      *       间隔/概率 {@code playRandom()} 挑新曲（{@code playOnce} 不检查 silenced），所以进入
      *       「已静音」态后定期补 {@code stop()}。新曲的淡入时长同样是 120 秒（音量≈0），
      *       所以这里的定期停不会产生可听到的断续。</li>
-     *   <li>放开时恢复 {@code foutTime}；游戏内额外调一次 {@code playRandom()} 让它立刻回来
-     *       （否则要等它 3 分钟的间隔与概率判定），主菜单则由游戏自己恢复菜单曲。</li>
+     *   <li>放开时只恢复 {@code foutTime} 并停止压制，**不主动把原生音乐叫回来**：等同把它当前曲「打断」，
+     *       之后交给游戏自己的 {@code musicInterval}（3 分钟）+ {@code musicChance} 判定挑下一首
+     *       （从头播，不保存/不恢复进度）。</li>
      * </ul>
      */
     private static void tickNativeMusic() {
@@ -716,12 +717,10 @@ public class MusicPlayer {
                         sc.foutTime = nativeSavedFoutTime;
                         nativeSavedFoutTime = -1f;
                     }
-                    Log.info("[Music] native music released");
-                    // 游戏内且规则未禁用音乐 → 立刻挑一首（从头播，不恢复进度）
-                    if (mindustry.Vars.state.isGame() && !mindustry.Vars.state.rules.disableMusic
-                            && sc.getCurrent() == null && Core.settings.getInt("musicvol", 100) > 0) {
-                        sc.playRandom();
-                    }
+                    // 只恢复「淡出时长」并停止压制，**不主动叫回原生音乐**：
+                    // 效果等同于把它的当前曲「打断」，之后由游戏自己的 musicInterval(3 分钟) + musicChance
+                    // 判定决定何时再挑一首（从头播，不恢复进度）。这样也不会出现「我们刚停、原生音乐立刻插进来」。
+                    Log.info("[Music] native music suppressed off (wait for game's own interval/chance)");
                 }
                 return;
             }
