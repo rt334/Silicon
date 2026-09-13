@@ -1105,7 +1105,7 @@ public class MusicPlayer {
                 Fi wav = transcodedWav(t.cacheHash);
                 if (wav != null) {
                     file = wav;
-                } else if (AudioTranscoder.isAvailable()) {
+                } else if (AudioTranscoder.canHandle(file)) {
                     final int target = index;
                     final String hash = t.cacheHash;
                     final Fi src = file;
@@ -1124,7 +1124,7 @@ public class MusicPlayer {
                 playing = false;
                 localVoiceId = -1;
                 // UI 反馈：不可解码格式此前静默无反应（问题15「不能播放」无任何提示）
-                toast(AudioTranscoder.isAvailable() ? "musicplayer.transcodeFail" : "musicplayer.needFfmpeg", t.name);
+                toast(AudioTranscoder.canHandle(file) ? "musicplayer.transcodeFail" : "musicplayer.needFfmpeg", t.name);
                 return;
             }
         }
@@ -2098,6 +2098,20 @@ public class MusicPlayer {
         try {
             if (!isAsciiPath(file.absolutePath())) {
                 SiliconLog.log("Block remote play of non-ASCII path: " + file.name());
+                return;
+            }
+            // 转码产物优先：远端共享的 mp3/flac/m4a 等在有 FFmpeg 时同样能播、能定位；
+            // 否则按需触发一次转码，完成后回到本方法继续（isTranscoding 期间直接返回，避免递归）
+            Fi wav = transcodedWav(hash);
+            if (wav != null) {
+                file = wav;
+            } else if (needsTranscode(file) && AudioTranscoder.canHandle(file)) {
+                if (!AudioTranscoder.isTranscoding(hash)) {
+                    final String rh = hash;
+                    final float ox = ownerX;
+                    final float oy = ownerY;
+                    AudioTranscoder.request(file, hash, () -> playRemoteVoice(ownerUuid, rh, ox, oy), null);
+                }
                 return;
             }
             if (!isDecodablePath(file.absolutePath())) {

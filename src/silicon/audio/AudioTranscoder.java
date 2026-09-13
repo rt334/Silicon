@@ -95,6 +95,19 @@ public class AudioTranscoder {
         return ffmpegPath() != null;
     }
 
+    /** 该文件是否由「本机能力」解码成 WAV：内置纯 Java 解码器（mp3/flac）优先，
+     *  其余格式只有装了 FFmpeg 才行。 */
+    public static boolean canHandle(Fi src) {
+        if (src == null) return false;
+        try {
+            java.io.File f = src.file();
+            byte[] head = silicon.audio.decode.InternalDecoders.readHead(f, 16);
+            if (silicon.audio.decode.InternalDecoders.supports(src.name(), head)) return true;
+        } catch (Exception ignored) {
+        }
+        return isAvailable();
+    }
+
     /** 重新探测（用户在设置里改了路径后调用） */
     public static synchronized void resetProbe() {
         available = null;
@@ -150,8 +163,8 @@ public class AudioTranscoder {
             return;
         }
         String exe = ffmpegPath();
-        if (exe == null) {
-            postFail(onFail, "ffmpeg missing");
+        if (exe == null && !canHandle(src)) {
+            postFail(onFail, "no decoder");
             return;
         }
         if (queued.putIfAbsent(hash, Boolean.TRUE) != null) {
@@ -165,36 +178,60 @@ public class AudioTranscoder {
                 if (tmp == null) throw new IllegalStateException("no tmp path");
                 if (tmp.exists()) tmp.delete();
                 out.parent().mkdirs();
-                ProcessBuilder pb = new ProcessBuilder(
-                        exe, "-hide_banner", "-nostdin", "-v", "error", "-y",
-                        "-i", src.absolutePath(),
-                        "-vn", "-map_metadata", "-1", "-c:a", "pcm_s16le",
-                        "-progress", "pipe:1", "-nostats",
-                        tmp.absolutePath());
-                pb.redirectErrorStream(true);
-                p = pb.start();
-                running.put(hash, p);
-                long deadline = System.currentTimeMillis() + TIMEOUT_MS;
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = r.readLine()) != null) {
-                        if (line.startsWith("out_time_ms=")) {
-                            try {
-                                float ms = Float.parseFloat(line.substring("out_time_ms=".length()));
-                                float total = MusicPlayer.trackLengthSeconds(hash);
-                                progress.put(hash, total > 0f ? Math.min(1f, ms / 1000f / total) : -1f);
-                            } catch (Exception ignored) {
-                            }
-                        }
-                        if (System.currentTimeMillis() > deadline) break;
+
+                // 1) 纯 Java 解码器优先：mp3/flac 不需要外部程序，跨平台一致
+                boolean done = false;
+                try {
+                    java.io.File srcFile = src.file();
+                    java.io.File tmpFile = tmp.file();
+                    byte[] head = silicon.audio.decode.InternalDecoders.readHead(srcFile, 16);
+                    if (silicon.audio.decode.InternalDecoders.supports(src.name(), head)) {
+                        progress.put(hash, 0.5f);
+                        done = silicon.audio.decode.InternalDecoders.decode(srcFile, tmpFile, src.name(), head);
                     }
+                } catch (Exception e) {
+                    Log.warn("[SiliconMusic] internal decode error: " + e.getMessage());
                 }
-                int code = p.waitFor();
-                if (System.currentTimeMillis() > deadline) {
-                    p.destroyForcibly();
-                    throw new IllegalStateException("timeout");
+                if (!done && silicon.audio.decode.InternalDecoders.lastError() != null) {
+                    Log.warn("[SiliconMusic] internal decode failed: " + silicon.audio.decode.InternalDecoders.lastError());
                 }
-                if (code != 0) throw new IllegalStateException("ffmpeg exit " + code);
+
+                // 2) 内置解码器不匹配/失败 → 交给 FFmpeg（若可用）
+                if (!done) {
+                    if (exe == null) throw new IllegalStateException("no decoder for this format");
+                    if (tmp.exists()) tmp.delete();
+                    ProcessBuilder pb = new ProcessBuilder(
+                            exe, "-hide_banner", "-nostdin", "-v", "error", "-y",
+                            "-i", src.absolutePath(),
+                            "-vn", "-map_metadata", "-1", "-c:a", "pcm_s16le",
+                            "-progress", "pipe:1", "-nostats",
+                            tmp.absolutePath());
+                    pb.redirectErrorStream(true);
+                    p = pb.start();
+                    running.put(hash, p);
+                    long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+                    try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = r.readLine()) != null) {
+                            if (line.startsWith("out_time_ms=")) {
+                                try {
+                                    float ms = Float.parseFloat(line.substring("out_time_ms=".length()));
+                                    float total = MusicPlayer.trackLengthSeconds(hash);
+                                    progress.put(hash, total > 0f ? Math.min(1f, ms / 1000f / total) : -1f);
+                                } catch (Exception ignored) {
+                                }
+                            }
+                            if (System.currentTimeMillis() > deadline) break;
+                        }
+                    }
+                    int code = p.waitFor();
+                    if (System.currentTimeMillis() > deadline) {
+                        p.destroyForcibly();
+                        throw new IllegalStateException("timeout");
+                    }
+                    if (code != 0) throw new IllegalStateException("ffmpeg exit " + code);
+                }
+
                 if (!tmp.exists() || tmp.length() <= 44) throw new IllegalStateException("empty output");
                 if (out.exists()) out.delete();
                 tmp.moveTo(out);
