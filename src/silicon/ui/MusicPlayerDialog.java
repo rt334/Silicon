@@ -532,7 +532,8 @@ public class MusicPlayerDialog extends BaseDialog {
     }
 
     private void togglePlay() {
-        if (MusicPlayer.isPlaying()) {
+        // 起播阶段（按钮已画成暂停）也走 pause：否则这一下反而又发起一次 resume，与图标语义相反
+        if (MusicPlayer.isPlaying() || MusicPlayer.isStarting()) {
             MusicPlayer.pause();
         } else {
             MusicPlayer.resume();

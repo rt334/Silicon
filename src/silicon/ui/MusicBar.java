@@ -153,7 +153,8 @@ public class MusicBar {
             play.getImage().setColor(MusicPlayer.isPlaying() ? Pal.accent : Color.white);
             play.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("播放/暂停")));
             play.clicked(() -> {
-                if (MusicPlayer.isPlaying()) MusicPlayer.pause(); else MusicPlayer.resume();
+                // 起播阶段（按钮画成暂停）点击也应当「暂停」，否则这一下反而又发起一次 resume
+                if (MusicPlayer.isPlaying() || MusicPlayer.isStarting()) MusicPlayer.pause(); else MusicPlayer.resume();
                 // 点击即同步图标/颜色（不依赖下一帧 update 才切换）
                 syncPlayButton(play);
             });

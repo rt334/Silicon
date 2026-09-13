@@ -1242,6 +1242,9 @@ public class MusicPlayer {
      */
     public static boolean isStarting() {
         if (playing) return false;
+        // 用户在起播阶段按过暂停 → 不再算「启动中」：UI 据此立刻把按钮从「暂停（压暗）」切回「播放」，
+        // 点击语义也随之在 pause/resume 之间正确翻转。
+        if (pausedByUser) return false;
         MusicTrack t = currentTrack();
         return t != null && AudioTranscoder.isTranscoding(t.cacheHash);
     }
