@@ -1537,6 +1537,54 @@ public class MusicPlayer {
 
     /** 指定曲目时长（秒）；未知返回 -1。本地曲目优先读原始文件（避免无谓的全文件异步缓存拷贝造成卡顿），
      *  非 ASCII 路径读取失败时回退到已有 ASCII 缓存（若无则不拷贝，返回 -1，播放后将填充）。结果按路径缓存。 */
+    /** 列表用：只取已缓存的时长，绝不做 I/O；未缓存则返回 -1 并转后台探测（探测完刷新列表）。 */
+    public static float trackLengthCached(MusicTrack t) {
+        if (t == null) return -1f;
+        try {
+            Fi f = t.isInternal() ? cacheFileOf(t) : (t.isUrl() ? cacheFileOf(t) : originalLocalFile(t));
+            if (f == null || !f.exists()) return -1f;
+            Float c = lengthCache.get(f.absolutePath());
+            if (c != null) return c;
+            scheduleLengthProbe(t);
+        } catch (Exception ignored) {
+        }
+        return -1f;
+    }
+
+    /** 正在后台探测时长的路径集合（避免重复排队） */
+    private static final arc.struct.ObjectSet<String> lengthPending = new arc.struct.ObjectSet<>();
+    private static final java.util.concurrent.ExecutorService probePool =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread th = new Thread(r, "silicon-music-probe");
+                th.setDaemon(true);
+                return th;
+            });
+
+    /** 后台探测时长（不阻塞渲染线程），完成后刷新播放器列表 */
+    private static void scheduleLengthProbe(MusicTrack t) {
+        if (t == null) return;
+        final Fi f = t.isInternal() ? cacheFileOf(t) : (t.isUrl() ? cacheFileOf(t) : originalLocalFile(t));
+        if (f == null || !f.exists()) return;
+        final String key = f.absolutePath();
+        if (lengthCache.containsKey(key) || lengthPending.contains(key)) return;
+        lengthPending.add(key);
+        probePool.submit(() -> {
+            try {
+                float len = readLengthFrom(f);
+                if (len > 0f) {
+                    Core.app.post(() -> {
+                        try {
+                            silicon.ui.MusicPlayerDialog.refreshIfOpen();
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+            } finally {
+                lengthPending.remove(key);
+            }
+        });
+    }
+
     public static float trackLengthOf(MusicTrack t) {
         if (t == null) return -1f;
         // 内部曲目：必须提取为真实磁盘文件才能读取时长
@@ -1548,20 +1596,16 @@ public class MusicPlayer {
             Fi f = resolveToPlayableFile(t);
             return f == null ? -1f : readLengthFrom(f);
         }
-        // 本地曲目：优先读原始文件（长度/大小都不需要拷贝）；路径 ASCII 也满足。
-        // 非 ASCII 原始路径读不出时长时，若无 ASCII 缓存则顺手做一次复制（限大小内），
-        // 让无中文路径也能立即显示时长（播放时仍会复用该缓存副本）
+        // 本地曲目：优先读原始文件（读时长不需要拷贝，ASCII 与否都能读）。
+        // 注意：这里**不再**为「显示时长」做整文件 ASCII 拷贝——旧实现会对非 ASCII 路径
+        // （如中文名 mp3）当场拷贝整个文件，而列表每次重建（打开面板、切歌、播放/暂停都会重建）
+        // 都逐首执行，是面板卡顿的主因。播放时本就会解码/转码到 ASCII 缓存，时长稍后自然可得。
         Fi orig = originalLocalFile(t);
         float len = orig == null ? -1f : readLengthFrom(orig);
         if (len <= 0f) {
             Fi cached = cacheFileOf(t);
             if (cached != null && cached.exists()) {
                 len = readLengthFrom(cached);
-            } else if (orig != null && orig.exists()
-                    && orig.isDirectory() == false
-                    && orig.length() > 0 && orig.length() <= LENGTH_PROBE_SIZE_LIMIT) {
-                Fi safe = localAsciiCopy(t, orig);
-                if (safe != null && safe.exists()) len = readLengthFrom(safe);
             }
         }
         return len;

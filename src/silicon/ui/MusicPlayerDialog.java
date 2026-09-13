@@ -875,7 +875,8 @@ public class MusicPlayerDialog extends BaseDialog {
             float curLen = MusicPlayer.trackLength();
             if (curLen > 0f) len = curLen;
         }
-        if (len <= 0f) len = MusicPlayer.trackLengthOf(t);
+        // 列表用非阻塞取值：未缓存则后台探测（绝不在此处做文件 I/O / 整文件拷贝）
+        if (len <= 0f) len = MusicPlayer.trackLengthCached(t);
         if (len <= 0f) return "--:--";
         int total = (int) len;
         return (total / 60) + ":" + (total % 60 < 10 ? "0" : "") + (total % 60);
