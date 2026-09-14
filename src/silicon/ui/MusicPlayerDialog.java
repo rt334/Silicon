@@ -242,7 +242,11 @@ public class MusicPlayerDialog extends BaseDialog {
         }).growX().padTop(2f).row();
 
         // —— 专辑筛选栏 ——
-        cont.table(albumsFilter -> {
+        // 专辑多时（8~10 个以上）横排放不下：整行会越推越宽、把弹窗挤出屏幕。
+        // 这里把这一行放进**横向可滚动**的 ScrollPane（纵向禁用），专辑再多也只是横向滚动。
+        Table albumsRow = new Table();
+        {
+            Table albumsFilter = albumsRow;
             albumsFilter.background(Styles.grayPanel);
             albumsFilter.margin(3f, 6f, 3f, 6f);
             // 「全部曲目」按钮
@@ -260,15 +264,21 @@ public class MusicPlayerDialog extends BaseDialog {
                 b.clicked(() -> { filterAlbum = name; rebuildRows(); });
                 albumsFilter.add(b).width(96f).height(BTN_H).pad(1f);
             }
-            // 新专辑按钮
-            albumsFilter.add().growX();
-            albumsFilter.button(Icon.add, Styles.cleari, this::newAlbumDialog).size(30f).padLeft(4f);
             // 删除当前筛选专辑按钮（仅 filterAlbum 非空时有效）
             ImageButton delAlbum = new ImageButton(Icon.trash, Styles.cleari);
             delAlbum.resizeImage(Scl.scl(15f));
             delAlbum.clicked(() -> deleteCurrentAlbum());
-            albumsFilter.add(delAlbum).size(30f).padLeft(2f);
-        }).growX().padTop(6f).row();
+            albumsFilter.add(delAlbum).size(30f).padLeft(6f);
+        }
+        ScrollPane albumScroll = new ScrollPane(albumsRow, Styles.defaultPane);
+        albumScroll.setScrollingDisabled(false, true); // 允许横向滚动、禁止纵向
+        albumScroll.setFadeScrollBars(false);
+        cont.add(albumScroll).growX().height(BTN_H + 12f).padTop(6f).row();
+        // 新专辑按钮固定在这一行右端（不随专辑数左右移动）
+        cont.table(row -> {
+            row.add().growX();
+            row.button(Icon.add, Styles.cleari, this::newAlbumDialog).size(30f).padLeft(4f);
+        }).growX().padTop(2f).row();
 
         // —— 音量 / 倍速（两个并排面板合为一行；2026-09-03 移除独立音高面板：Soloud 无独立音调控制、
         //    变速不变调需引入 ffmpeg，故只保留一个「倍速」控制，变速即变调，自然声学） ——

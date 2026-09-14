@@ -85,6 +85,9 @@ public class MusicNetwork {
     private static final long MAX_SHARE_BYTES = 64L * 1024 * 1024;
     /** 服务端转发速率上限：单玩家 2MB/s（1 秒滑动窗口） */
     private static final long MAX_RELAY_BYTES_PER_SEC = 2L * 1024 * 1024;
+    /** 字符串控制包（mp-sync/mp-meta/mp-pos）的中继上限：单玩家 16KB/s。
+     *  这些包很小（几百字节），原先**完全没有速率限制**——刷字符串包同样能让服务端替它向全场放大流量。 */
+    private static final long MAX_RELAY_STRING_BYTES_PER_SEC = 16L * 1024;
     /** 同时进行的「分块接收」上限：每个条目会分配 boolean[chunkCount]（≤4KB）并建一个 ≤64MB 的 .part 文件，
      *  不限个数时单个客户端广播 N 个 hash 就能同时吃满内存与磁盘（.part 不参与 LRU 淘汰） */
     private static final int MAX_CONCURRENT_RECV = 4;
@@ -175,7 +178,7 @@ public class MusicNetwork {
                 }
             } catch (Exception ignored) {
             }
-            Call.clientPacketReliable(MSG_SYNC, data);
+            if (!allowStringRelay(key, data.length())) return; // 字符串控制包也要限速
         });
         netServer.addPacketHandler(MSG_META, (p, data) -> {
             if (p == null || data == null) return;
@@ -187,7 +190,7 @@ public class MusicNetwork {
                 if (isValidHash(hash)) relayHash.put(playerKey(p), hash);
             } catch (Exception ignored) {
             }
-            Call.clientPacketReliable(MSG_META, data);
+            if (!allowStringRelay(playerKey(p), data.length())) return;
         });
         netServer.addPacketHandler(MSG_POS, (p, data) -> {
             if (p == null || data == null) return;
@@ -199,7 +202,7 @@ public class MusicNetwork {
             } catch (Exception ignored) {
                 return;
             }
-            Call.clientPacketUnreliable(MSG_POS, data);
+            if (!allowStringRelay(playerKey(p), data.length())) return;
         });
         netServer.addBinaryPacketHandler(MSG_CHUNK, (p, bytes) -> {
             if (p == null || bytes == null) return;
@@ -234,6 +237,15 @@ public class MusicNetwork {
 
     /** 每秒转发字节配额（简单滑动窗口，超限即丢包，避免服务端被单玩家刷爆上行） */
     private static boolean allowRelay(String key, int bytes) {
+        return allowRelay(key, bytes, MAX_RELAY_BYTES_PER_SEC);
+    }
+
+    /** 字符串控制包的中继配额（上限更小；与分块共用同一张窗口表，key 加前缀区分） */
+    private static boolean allowStringRelay(String key, int bytes) {
+        return allowRelay("s:" + key, bytes, MAX_RELAY_STRING_BYTES_PER_SEC);
+    }
+
+    private static boolean allowRelay(String key, int bytes, long limit) {
         long now = System.currentTimeMillis();
         long[] q = relayQuota.get(key);
         if (q == null || now - q[0] >= 1000L) {
@@ -241,7 +253,7 @@ public class MusicNetwork {
             relayQuota.put(key, q);
         }
         q[1] += bytes;
-        return q[1] <= MAX_RELAY_BYTES_PER_SEC;
+        return q[1] <= limit;
     }
 
     // ------------------------------------------------------------------
