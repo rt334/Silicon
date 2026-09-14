@@ -877,7 +877,7 @@ public class MusicPlayerDialog extends BaseDialog {
         dlg.cont.table(t -> {
             addIconButton(t, Icon.book, "musicplayer.addInternal", () -> {
                 dlg.hide();
-                showInternalPicker();
+                internalPickTracksDialog(); // 与「从列表选取曲目」同一形式（多选）
             });
             addIconButton(t, Icon.link, "musicplayer.addUrl", () -> {
                 dlg.hide();
@@ -911,6 +911,72 @@ public class MusicPlayerDialog extends BaseDialog {
         row.add(img).size(24f).padRight(8f);
         row.add(textBtn(Core.bundle.get(bundleKey), action)).width(216f).height(48f);
         parent.add(row).pad(3f).row();
+    }
+
+    /**
+     * 内置曲目的**多选**弹窗：与「从列表选取曲目」同一形式（勾选框 + 全选/全不选 + 确定）。
+     * <p>
+     * 内置曲目本来就已经在曲库里（ensureInternalTracks），所以「添加」的语义是：
+     * <ul>
+     *   <li>已选中专辑 → 把勾选的内置曲目批量加入该专辑；</li>
+     *   <li>没选专辑 → 播放第一个勾选项（保留原来「点一首就播」的用途）。</li>
+     * </ul>
+     */
+    private void internalPickTracksDialog() {
+        BaseDialog dlg = new BaseDialog(Core.bundle.get("musicplayer.addInternal"));
+        String[] keys = MusicPlayer.internalKeys();
+        if (keys == null) keys = new String[0];
+        Table list = new Table();
+        list.top();
+        list.defaults().pad(2f).left();
+        final boolean[] checked = new boolean[keys.length];
+        final Seq<CheckBox> boxes = new Seq<>();
+        for (int i = 0; i < keys.length; i++) {
+            final String k = keys[i];
+            String label;
+            try { String v = Core.bundle.get("music." + k); label = (v != null && !v.contains("??")) ? v : k; } catch (Exception e) { label = k; }
+            final int idx = i;
+            MusicTrack t = MusicPlayer.trackByHash("int-" + k);
+            checked[i] = filterAlbum != null && t != null && isInAlbum(filterAlbum, t.cacheHash);
+            CheckBox cb = new CheckBox(label);
+            cb.setChecked(checked[i]);
+            cb.changed(() -> checked[idx] = cb.isChecked());
+            boxes.add(cb);
+            list.add(cb).growX().row();
+        }
+        if (filterAlbum != null) {
+            dlg.cont.add(Core.bundle.get("musicplayer.importToAlbum") + ": [accent]"
+                    + filterAlbum.replace("[", "[[").replace("]", "]]") + "[]").pad(8f).row();
+        }
+        ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
+        pane.setFadeScrollBars(false);
+        dlg.cont.add(pane).growX().height(320f).pad(4f).row();
+        dlg.cont.table(row -> {
+            row.defaults().height(BTN_H).pad(2f);
+            row.add(textBtn(Core.bundle.get("musicplayer.selectAll"), () -> {
+                for (int i = 0; i < checked.length; i++) { checked[i] = true; boxes.get(i).setChecked(true); }
+            })).growX();
+            row.add(textBtn(Core.bundle.get("musicplayer.selectNone"), () -> {
+                for (int i = 0; i < checked.length; i++) { checked[i] = false; boxes.get(i).setChecked(false); }
+            })).growX();
+        }).growX().padTop(4f).row();
+        dlg.buttons.defaults().height(BTN_H).width(120f).pad(4f);
+        dlg.buttons.add(textBtn(Core.bundle.get("musicplayer.confirm"), () -> {
+            int firstIdx = -1;
+            for (int i = 0; i < keys.length; i++) {
+                if (!checked[i]) continue;
+                MusicTrack t = MusicPlayer.trackByHash("int-" + keys[i]);
+                if (t == null) continue;
+                if (filterAlbum != null) MusicPlayer.addTrackHashToAlbum(filterAlbum, t.cacheHash);
+                if (firstIdx < 0) firstIdx = MusicPlayer.tracks().indexOf(t);
+            }
+            dlg.hide();
+            if (filterAlbum != null) rebuildRows();
+            else if (firstIdx >= 0) MusicPlayer.play(firstIdx);
+        }));
+        dlg.buttons.add(textBtn(Core.bundle.get("universal-junction.cancel", "取消"), dlg::hide));
+        dlg.closeOnBack();
+        dlg.show();
     }
 
     private void showInternalPicker() {
