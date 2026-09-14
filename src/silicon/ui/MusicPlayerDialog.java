@@ -402,7 +402,7 @@ public class MusicPlayerDialog extends BaseDialog {
             more.defaults().pad(2f).left();
 
             more.table(row -> {
-                row.add(new arc.scene.ui.Image(Icon.chat)).size(12f).padRight(4f);
+                // 不再在前面放图标（用户要求去掉）：勾选框本身已够清楚，图标只占宽
                 CheckBox share = new CheckBox(Core.bundle.get("musicplayer.share"));
                 share.setChecked(MusicPlayer.isShareEnabled());
                 share.changed(() -> MusicPlayer.setShareEnabled(share.isChecked()));
@@ -412,7 +412,6 @@ public class MusicPlayerDialog extends BaseDialog {
             }).growX().left().row();
 
             more.table(row -> {
-                row.add(new arc.scene.ui.Image(Icon.ok)).size(12f).padRight(4f);
                 CheckBox enable = new CheckBox(Core.bundle.get("musicplayer.enable"));
                 enable.setChecked(MusicPlayer.isEnabled());
                 enable.changed(() -> MusicPlayer.setEnabled(enable.isChecked()));
