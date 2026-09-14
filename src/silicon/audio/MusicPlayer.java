@@ -1185,8 +1185,19 @@ public class MusicPlayer {
                     if (a != null && a.hashes != null) a.hashes.remove(h);
                 }
             }
-            // 正在播放这首被清掉的曲目时停止播放，避免 curren 指向已移除条目
-            if (current >= tracks.size) current = -1;
+            // 正在播放这首被清掉的曲目时停止播放；否则索引要跟着左移（只判 current>=size 是不够的：
+            // 删中间某首时 current 会静默指向「后一首滑到该位置」，UI 高亮错、resume 从错曲开始）
+            if (current == i) {
+                stopLocal();
+                pausedPosition = 0f;
+                pausedLength = -1f;
+                current = -1;
+                Core.settings.put(CFG_LAST, current);
+                bcast("stop");
+            } else if (current > i) {
+                current--;
+                Core.settings.put(CFG_LAST, current);
+            }
             SiliconLog.log("pruned missing internal track: " + key);
         }
         if (changed) {
