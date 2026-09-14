@@ -1169,7 +1169,10 @@ public class MusicPlayer {
         }
         // 2) 清掉**当前游戏里已不存在**的内置曲目（换版本/某些曲目被移除时，旧条目会一直挂在
         //    「全部曲目」里，点了没声音）；同时把专辑里指向它们的 hash 一起清掉，避免专辑出现死项。
-        for (int i = tracks.size - 1; i >= 0; i--) {
+        //    安全阀：只有「至少能确认一首存在」时才清理——万一将来游戏改了 Musics 的类名/结构，
+        //    反射会全部判 false，那时若照常清理就会把用户的内置条目全部删掉（灾难性且难恢复）。
+        boolean anyExists = internalKeys().length > 0;
+        for (int i = tracks.size - 1; anyExists && i >= 0; i--) {
             MusicTrack t = tracks.get(i);
             if (t == null || !t.isInternal()) continue;
             String key = t.source != null ? t.source : t.name;
