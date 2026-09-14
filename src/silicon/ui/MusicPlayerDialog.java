@@ -774,18 +774,7 @@ public class MusicPlayerDialog extends BaseDialog {
                 dlg.hide();
                 rebuildRows();
             });
-            // 每行右侧一个「多选」入口：打开**从曲目列表多选**加入/移出该专辑的弹窗
-            // （用户需求：单曲行的「加入专辑」弹窗里也能批量挑曲）
-            TextButton multi = textBtn(Core.bundle.get("musicplayer.pickTracksShort", "多选"), () -> {
-                dlg.hide();
-                albumPickTracksDialog(albumName);
-            });
-            multi.addListener(new Tooltip(tt -> tt.background(Styles.black6).margin(4f)
-                    .add(Core.bundle.get("musicplayer.pickTracksHint", "从曲目列表多选加入/移出该专辑"))));
-            Table rowT = new Table();
-            rowT.add(b).growX().height(BTN_H).pad(2f);
-            rowT.add(multi).height(BTN_H).width(84f).pad(2f);
-            list.add(rowT).growX().row();
+            list.add(b).growX().height(BTN_H).pad(2f).row();
         }
         ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
         dlg.cont.add(pane).grow().height(220f);
@@ -900,6 +889,11 @@ public class MusicPlayerDialog extends BaseDialog {
             });
             if (filterAlbum != null) {
                 String safe = filterAlbum.replace("[", "[[").replace("]", "]]");
+                // 已选中专辑时，多一个「从曲目列表多选」入口（用户需求：添加曲目时可从播放器列表里挑、可多选）
+                addIconButton(t, Icon.list, "musicplayer.pickTracks", () -> {
+                    dlg.hide();
+                    albumPickTracksDialog(filterAlbum);
+                });
                 t.add("[gray]" + Core.bundle.get("musicplayer.importToAlbum") + ": [accent]" + safe + "[]")
                         .growX().padTop(6f);
             }
