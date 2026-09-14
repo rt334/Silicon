@@ -498,7 +498,10 @@ public class MusicPlayerDialog extends BaseDialog {
                 float overhead = Math.max(0f, getHeight() - cont.getHeight());
                 // 末尾再留出**一行曲目**的空隙（用户要求「留一行空隙」）：一行 = 44 cell 单位 × Scl
                 float oneRowPx = 44f * Scl.scl(1f);
-                float avail = screenPx - overhead - otherPx - 32f - oneRowPx;
+                // 上下安全留白：弹窗是居中的，所以这里留 180px 总量 ≈ 上下各 90px——
+                // 之前只留 32px 时整窗顶到屏幕边，标题「音乐播放器」被顶部 HUD/屏幕边缘挡住（用户反馈）。
+                float safePx = 180f;
+                float avail = screenPx - overhead - otherPx - safePx - oneRowPx;
                 float targetPx = Math.max(210f, avail);
                 if (Math.abs(targetPx - listPx[0]) > 6f) {                    // 变化不大就不动，避免每帧重排
                     MusicBar.diag("list height: screen=" + (int) screenPx + " contH=" + (int) cont.getHeight()
