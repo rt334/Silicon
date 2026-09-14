@@ -470,12 +470,26 @@ public class MusicPlayerDialog extends BaseDialog {
         ScrollPane pane = new ScrollPane(trackTable, Styles.defaultPane);
         pane.setScrollingDisabled(true, false);
         pane.setFadeScrollBars(false);
-        // 适配屏幕：列表高度取屏幕高的 30%（夹在 140~420 Scl 之间）。
-        // 原来用 growY + minHeight：弹窗高度由内容决定，曲目一多列表就把弹窗撑得比屏幕还高，
-        // 下方内容被切掉、背景也覆盖不到——固定成屏幕比例后，多出来的曲目在列表内滚动。
-        // 夹取也要用 cell 单位（Cell.height 内部会再乘一次 Scl）：屏幕高 30%，raw 单位下夹在 140~420
-        float listH = Math.max(140f, Math.min(420f, Core.graphics.getHeight() / Scl.scl(1f) * 0.30f));
-        cont.add(pane).growX().height(listH).padTop(2f).row();
+        // 曲目列表吃满剩余高度 → 弹窗一直撑到接近屏幕底部（用户要求）。
+        // 初始给一个屏幕 30% 的估计值，之后**每帧按「其它行的实际 pref」反推可用高度**：
+        //   可用 = 屏幕高 - 其它行占用 - 余量
+        // 这样不必硬编码各行的尺寸（增删按钮也不会失配），也不会把弹窗顶出屏幕
+        // （注意 Cell.height 内部还会乘一次 Scl，所以这里一律用 cell 单位）。
+        final float[] listH = {Math.max(140f, Math.min(420f, Core.graphics.getHeight() / Scl.scl(1f) * 0.30f))};
+        final arc.scene.ui.layout.Cell<?> paneCell = cont.add(pane).growX().height(listH[0]).padTop(2f);
+        paneCell.row();
+        update(() -> {
+            try {
+                float screenH = Core.graphics.getHeight() / Scl.scl(1f);   // 屏幕高（cell 单位）
+                float other = cont.getPrefHeight() - listH[0];             // 其它行占用（其余行的 pref 与列表高度无关）
+                float target = Math.max(140f, Math.min(screenH - 24f, screenH - other - 16f));
+                if (Math.abs(target - listH[0]) > 4f) {                    // 变化不大就不动，避免每帧重排
+                    listH[0] = target;
+                    paneCell.height(target);
+                }
+            } catch (Throwable ignored) {
+            }
+        });
     }
 
     private String nowPlayingLabel() {
