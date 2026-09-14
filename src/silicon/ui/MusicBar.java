@@ -385,13 +385,7 @@ public class MusicBar {
         clampBar();
     }
 
-    /** 紧凑图标按钮（悬浮条用）：返回并以 Cell.pad 收尾以便链式调整间距 */
-    private static Cell iconBtn(Table parent, arc.scene.style.Drawable icon, Runnable action) {
-        ImageButton b = new ImageButton(icon, Styles.cleari);
-        b.resizeImage(Scl.scl(18f));
-        b.clicked(action);
-        return parent.add(b).size(32f);
-    }
+
 
     /** 同步播放/暂停按钮图标颜色到当前 isPlaying 状态（悬浮窗停止/开始按钮切换修复）。
      *  另加「启动中」态：转码/解封装期间 isPlaying 仍为 false，若只按 isPlaying 画，用户点了播放

@@ -924,8 +924,8 @@ public class MusicPlayerDialog extends BaseDialog {
      */
     private void internalPickTracksDialog() {
         BaseDialog dlg = new BaseDialog(Core.bundle.get("musicplayer.addInternal"));
-        String[] keys = MusicPlayer.internalKeys();
-        if (keys == null) keys = new String[0];
+        String[] keysRaw = MusicPlayer.internalKeys();
+        final String[] keys = keysRaw == null ? new String[0] : keysRaw; // 必须 effectively final：确定按钮的 lambda 会捕获它
         Table list = new Table();
         list.top();
         list.defaults().pad(2f).left();
@@ -979,31 +979,7 @@ public class MusicPlayerDialog extends BaseDialog {
         dlg.show();
     }
 
-    private void showInternalPicker() {
-        BaseDialog dlg = new BaseDialog(Core.bundle.get("musicplayer.addInternal"));
-        Table list = new Table();
-        list.top();
-        String[] keys = MusicPlayer.internalKeys();
-        for (String k : keys) {
-            String label;
-            try { String v = Core.bundle.get("music." + k); label = (v != null && !v.contains("??")) ? v : k; } catch (Exception e) { label = k; }
-            final String key = k;
-            TextButton row = textBtn(label, () -> {
-                MusicTrack t = MusicPlayer.trackByHash("int-" + key);
-                if (t != null) {
-                    int idx = MusicPlayer.tracks().indexOf(t);
-                    if (idx >= 0) MusicPlayer.play(idx);
-                }
-                dlg.hide();
-                rebuild();
-            });
-            list.add(row).growX().height(BTN_H).pad(2f).row();
-        }
-        ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
-        dlg.cont.add(pane).grow().height(260f);
-        dlg.closeOnBack();
-        dlg.show();
-    }
+
 
     private void showSourceInput(int type) {
         if (type == MusicTrack.LOCAL) {
