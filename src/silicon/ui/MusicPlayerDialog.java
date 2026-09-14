@@ -274,16 +274,9 @@ public class MusicPlayerDialog extends BaseDialog {
         albumScroll.setScrollingDisabled(false, true); // 允许横向滚动、禁止纵向
         albumScroll.setFadeScrollBars(false);
         cont.add(albumScroll).growX().height(BTN_H + 12f).padTop(6f).row();
-        // 新专辑按钮固定在这一行右端（不随专辑数左右移动）；选中专辑时多一个「从列表选取曲目」入口
+        // 新专辑按钮固定在这一行右端（不随专辑数左右移动）
         cont.table(row -> {
             row.add().growX();
-            if (filterAlbum != null) {
-                final String target = filterAlbum;
-                TextButton pick = textBtn(Core.bundle.get("musicplayer.pickTracks"), () -> albumPickTracksDialog(target));
-                pick.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f)
-                        .add(Core.bundle.get("musicplayer.pickTracksHint", "从曲目列表多选加入/移出「" + target + "」"))));
-                row.add(pick).height(BTN_H).padRight(6f);
-            }
             row.button(Icon.add, Styles.cleari, this::newAlbumDialog).size(30f).padLeft(4f);
         }).growX().padTop(2f).row();
 
@@ -771,6 +764,7 @@ public class MusicPlayerDialog extends BaseDialog {
         for (int i = 0; i < albums.size; i++) {
             MusicPlayer.Album a = albums.get(i);
             final int ai = i;
+            final String albumName = a.name;
             boolean inAlbum = a.hashes.contains(t.cacheHash);
             String label = (inAlbum ? "[accent]✓ [/]" : "  ") + a.name;
             TextButton b = textBtn(label, null);
@@ -780,7 +774,18 @@ public class MusicPlayerDialog extends BaseDialog {
                 dlg.hide();
                 rebuildRows();
             });
-            list.add(b).growX().height(BTN_H).pad(2f).row();
+            // 每行右侧一个「多选」入口：打开**从曲目列表多选**加入/移出该专辑的弹窗
+            // （用户需求：单曲行的「加入专辑」弹窗里也能批量挑曲）
+            TextButton multi = textBtn(Core.bundle.get("musicplayer.pickTracksShort", "多选"), () -> {
+                dlg.hide();
+                albumPickTracksDialog(albumName);
+            });
+            multi.addListener(new Tooltip(tt -> tt.background(Styles.black6).margin(4f)
+                    .add(Core.bundle.get("musicplayer.pickTracksHint", "从曲目列表多选加入/移出该专辑"))));
+            Table rowT = new Table();
+            rowT.add(b).growX().height(BTN_H).pad(2f);
+            rowT.add(multi).height(BTN_H).width(84f).pad(2f);
+            list.add(rowT).growX().row();
         }
         ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
         dlg.cont.add(pane).grow().height(220f);
