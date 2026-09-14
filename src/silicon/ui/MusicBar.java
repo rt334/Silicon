@@ -495,6 +495,9 @@ public class MusicBar {
 
         @Override
         public void draw() {
+            // 先画滑块本体（背景/旋钮），再叠 A-B 色带：反过来的话色带会被滑杆背景的九宫格盖住
+            // （审查指出 sliderBack 中间透明、边框不透明，画在下面时会显得断断续续）。
+            super.draw();
             if (MusicPlayer.hasAb()) {
                 float len = MusicPlayer.trackLength();
                 if (len > 0f) {
@@ -505,12 +508,11 @@ public class MusicBar {
                     float x1 = this.x + Scl.scl(4f) + hi * (w - this.x - Scl.scl(8f));
                     float mid = this.y + this.height / 2f;
                     float th = Math.max(Scl.scl(3f), Math.min(Scl.scl(6f), this.height * 0.5f));
-                    Draw.color(Pal.accent, 0.55f);
+                    Draw.color(Pal.accent, 0.45f);
                     Fill.crect(x0, mid - th / 2f, x1 - x0, th);
                     Draw.reset();
                 }
             }
-            super.draw();
         }
     }
 

@@ -380,6 +380,15 @@ public class MusicPlayerDialog extends BaseDialog {
                 MusicPlayer.cycleLoopMode();
                 loop.setText(loopModeText());
             });
+            // 外部改变循环模式时（悬浮条上的循环按钮）也要跟着变，否则弹窗里会停在旧文案
+            final String[] lastLoopTxt = {loopModeText()};
+            loop.update(() -> {
+                String txt = loopModeText();
+                if (!lastLoopTxt[0].equals(txt)) {
+                    lastLoopTxt[0] = txt;
+                    loop.setText(txt);
+                }
+            });
             bottom.add(loop).width(84f).height(BTN_H).pad(2f);
 
             TextButton rev = textBtn(Core.bundle.get("musicplayer.reverse"), MusicPlayer::toggleReverse);
@@ -453,11 +462,16 @@ public class MusicPlayerDialog extends BaseDialog {
             h.add(countLbl).left();
             h.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f).add("共 " + MusicPlayer.tracks().size + " 首")));
         }).left().padBottom(2f).row();
+        // 计数标签：只在「总数/筛选条件/可见数」变化时才重算+setText。
+        // 原实现每帧都遍历整库并做 toLowerCase() 字符串分配（列表长时是明显的每帧开销）。
+        final int[] lastCountKey = {-1};
         countLbl.update(() -> {
             int total = MusicPlayer.tracks().size;
-            // 统计当前过滤后的可见数量（与 rebuildRows 同口径）
-            int visible = 0;
             String ft = filterText == null ? "" : filterText.trim().toLowerCase();
+            int key = (total * 31 + ft.hashCode()) * 31 + (filterAlbum == null ? 0 : filterAlbum.hashCode());
+            if (key == lastCountKey[0]) return; // 输入没变：连可见数都不必重算（可见数只由这三者决定）
+            lastCountKey[0] = key;
+            int visible = 0;
             for (MusicTrack t : MusicPlayer.tracks()) {
                 if (filterAlbum != null && !isInAlbum(filterAlbum, t.cacheHash)) continue;
                 if (!ft.isEmpty() && (t.name == null || !t.name.toLowerCase().contains(ft))) continue;

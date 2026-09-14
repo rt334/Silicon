@@ -1057,8 +1057,10 @@ public class MusicPlayer {
             // 本机声源原点跟随玩家（自己永远在声源处 → 恒 0 位移全音量）；
             // 远程声源原点固定在 owner 位置，听者按「自己到 owner」衰减。
             if (v.isLocalOwner) {
-                v.lastX = player.x;
-                v.lastY = player.y;
+                // player 在主菜单可能为 null（本模组音乐允许在菜单播放）：直接解引用会 NPE，
+                // 被外层 catch 吞掉后声源已被 dispose 但没有 stop，可能留下无法回收的残留声音。
+                v.lastX = player == null ? 0f : player.x;
+                v.lastY = player == null ? 0f : player.y;
             }
             // 本机恒在声源处 → 全音量；远程才做距离衰减。修复：本机音量不再乘以 0.12 的 BASE_VOLUME，避免几乎听不见。
             float vol = v.isLocalOwner ? effectiveVolume() : calcListenVolume(v.lastX - player.x, v.lastY - player.y);
@@ -1222,6 +1224,12 @@ public class MusicPlayer {
             stopLocal();
             pausedPosition = 0f;
             pausedLength = -1f;
+            // 删掉的正是当前曲目：current 必须置空。否则删除后索引滑位，currentTrack() 会静默指向
+            // 「滑进来的下一首」——UI 高亮成另一首、play()/resume() 也会从那一首开始；
+            // 同时要广播 stop，否则远端会继续把那首（已删的）播完。
+            current = -1;
+            Core.settings.put(CFG_LAST, current);
+            bcast("stop");
         }
         if (current > index) current--;
         tracks.remove(index);
@@ -1272,6 +1280,10 @@ public class MusicPlayer {
         // 会跳到「旧current+1」即下一首（如点外部歌曲却跳到 game2）。提前设新 current 防止错跳。
         current = index;
         Core.settings.put(CFG_LAST, current);
+        // 用户显式点播 → 清掉该曲的转码失败记录，给它一次重试机会
+        // （transcodeFailed 原先只增不减：一次瞬时失败会让这首曲整局都播不了，只能重启游戏）
+        MusicTrack re = tracks.get(index);
+        if (re != null) transcodeFailed.remove(re.cacheHash);
         stopLocal();
         wasPlayingBeforePause = false;
         resumeGraceUntil = -1f;
@@ -1474,8 +1486,8 @@ public class MusicPlayer {
             v.isLocalOwner = true;
             v.voiceId = id;
             v.sound = snd;
-            v.lastX = player.x;
-            v.lastY = player.y;
+            v.lastX = player == null ? 0f : player.x;
+            v.lastY = player == null ? 0f : player.y;
             v.createdAt = Time.time;
             voices.add(v);
         } catch (Exception e) {
@@ -1809,18 +1821,23 @@ public class MusicPlayer {
         if (lengthCache.containsKey(key) || lengthPending.contains(key)) return;
         lengthPending.add(key);
         probePool.submit(() -> {
+            float len;
             try {
-                float len = readLengthFrom(f);
-                if (len > 0f) {
-                    Core.app.post(() -> {
-                        try {
-                            silicon.ui.MusicPlayerDialog.refreshIfOpen();
-                        } catch (Throwable ignored) {
-                        }
-                    });
-                }
+                len = readLengthFrom(f);
             } finally {
-                lengthPending.remove(key);
+                // 队列标记只在主线程改：arc 的 ObjectSet 不是线程安全的，而渲染线程会读 lengthPending
+                Core.app.post(() -> lengthPending.remove(key));
+            }
+            if (len > 0f) {
+                // 缓存写入同样回主线程：lengthCache 由渲染线程读（trackLengthCached），
+                // 在探测线程 put 属于跨线程改非线程安全集合（审查项）。
+                Core.app.post(() -> {
+                    try {
+                        lengthCache.put(key, len);
+                        silicon.ui.MusicPlayerDialog.refreshIfOpen();
+                    } catch (Throwable ignored) {
+                    }
+                });
             }
         });
     }
@@ -1990,6 +2007,9 @@ public class MusicPlayer {
 
     /** 记录待校验的 seek：0.35s 后由 tickLocal 读回真实位置比对（两次不匹配判不可靠） */
     private static void scheduleSeekVerify(float target) {
+        // 反射桥不可用时不要做校验：那时 getPosition() 恒返回 0、seek() 是空操作，
+        // 校验必然失败并把 seekUnreliable 置真、停播（表现为「拖动一下就停播」）。
+        if (!SoloudBridge.available()) return;
         seekVerifyTarget = target;
         seekVerifyAt = Time.time + 0.35f;
         seekVerifyFails = 0;
@@ -2125,6 +2145,15 @@ public class MusicPlayer {
             String e = ext == null ? ".ogg" : ext;
             evictHashVariants(t.cacheHash, e);
             Fi out = cacheFileForHash(t.cacheHash, e);
+            // 本地副本也受体积上限约束：本源超限时不再整份拷进缓存（否则几 GB 的本地文件会把缓存盘占满，
+            // 而且拷贝期间播放路径一直阻塞）；这类文件走「解码/流式」路径即可。
+            try {
+                if (src.length() > LENGTH_PROBE_SIZE_LIMIT) {
+                    SiliconLog.log("skip ascii cache copy (source too large: " + src.length() + "B) " + src.name());
+                    return null;
+                }
+            } catch (Exception ignored) {
+            }
             if (out.exists()) {
                 // 本地文件内容可能已更新但路径 hash 不变（hash 取路径字符串），若源文件大小与缓存不一致则视为过期，删旧后重拷
                 try { if (src.length() == out.length()) return out; else out.delete(); } catch (Exception ignored) { return out; }
@@ -2618,6 +2647,11 @@ public class MusicPlayer {
             } catch (Throwable ignored) {
             }
             return 0f;
+        }
+
+        /** 反射桥是否可用：用于决定要不要做 seek 校验（不可用时校验必然误判为「seek 不可靠」） */
+        static boolean available() {
+            return GET_POS != null && SEEK != null;
         }
 
         static void seek(int voiceId, float seconds) {
