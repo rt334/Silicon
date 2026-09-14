@@ -36,15 +36,13 @@ public class MusicPlayerDialog extends BaseDialog {
     /** 主播放/暂停按钮的引用：供 MusicPlayer 每帧推送刷新（元素自身 update 不可靠，见 MusicBar.syncNow 注释） */
     private ImageButton ppBtn;
 
-    /** 由 MusicPlayer 每帧调用：把播放/起播态直接刷到主按钮上（弹窗没开时是无害的空操作） */
+    /** 由 MusicPlayer 每帧调用：把播放/起播态直接刷到主按钮上（弹窗没开时是无害的空操作）。
+     *  图标同步交给 {@link MusicBar#applyPlayIcon}：它改的是按钮**自己的 style 副本**——
+     *  arc 的 ImageButton.draw() 每帧会用 style.imageUp 覆盖子 Image，光改子元素不生效（已实测）。 */
     public static void syncPlayButtonNow() {
         MusicPlayerDialog d = instance;
         if (d == null || d.ppBtn == null || !d.isShown() || d.getScene() != Core.scene) return;
-        boolean p = MusicPlayer.isPlaying();
-        boolean starting = !p && MusicPlayer.isStarting();
-        if (d.ppBtn.getImage() == null) return;
-        d.ppBtn.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
-        d.ppBtn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
+        MusicBar.applyPlayIcon(d.ppBtn);
     }
     /** 当前专辑筛选（null = 全部曲目） */
     private String filterAlbum = null;
@@ -220,7 +218,7 @@ public class MusicPlayerDialog extends BaseDialog {
                     .growX().height(48f).padRight(2f);
             ctrl.button(Icon.leftSmall, Styles.flati, () -> MusicPlayer.seekRelative(-10f))
                     .growX().height(48f).pad(2f);
-            ImageButton pp = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.flati);
+            ImageButton pp = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, MusicBar.playStyle(Styles.flati));
             ppBtn = pp; // 供 MusicPlayer 每帧推送刷新（见 syncPlayButtonNow）
             pp.resizeImage(Scl.scl(26f));
             pp.getImage().setColor(MusicPlayer.isPlaying() ? Pal.accent : Color.white);

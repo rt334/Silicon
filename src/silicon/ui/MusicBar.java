@@ -104,7 +104,7 @@ public class MusicBar {
 
         if (collapsed) {
             // 收起态：播放中显示暂停、暂停中显示播放，颜色随状态高亮，悬停显示曲名
-            ImageButton btn = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.cleari);
+            ImageButton btn = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, playStyle(Styles.cleari));
             btn.resizeImage(Scl.scl(26f));
             collapsedBtn = btn; // 供 MusicPlayer 每帧推送刷新（见 syncNow）
             btn.update(() -> {
@@ -152,7 +152,7 @@ public class MusicBar {
             controls.add(rewindBtn).size(32f).pad(1f);
 
             // 播放/暂停
-            ImageButton play = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, Styles.flati);
+            ImageButton play = new ImageButton(MusicPlayer.isPlaying() ? Icon.pause : Icon.play, playStyle(Styles.flati));
             play.resizeImage(Scl.scl(22f));
             playBtn = play; // 供 MusicPlayer 每帧推送刷新（见 syncNow）
             play.getImage().setColor(MusicPlayer.isPlaying() ? Pal.accent : Color.white);
@@ -161,7 +161,7 @@ public class MusicBar {
                 // 起播阶段（按钮画成暂停）点击也应当「暂停」，否则这一下反而又发起一次 resume
                 if (MusicPlayer.isPlaying() || MusicPlayer.isStarting()) MusicPlayer.pause(); else MusicPlayer.resume();
                 // 点击即同步图标/颜色（不依赖下一帧 update 才切换）
-                syncPlayButton(play);
+                applyPlayIcon(play);
             });
             // 每帧同步图标到当前播放态（兜底异步建源/暂停/停止路径，悬浮窗停止/开始按钮切换修复）
             playButtonFrameSync(play);
@@ -395,13 +395,45 @@ public class MusicBar {
 
     /** 同步播放/暂停按钮图标颜色到当前 isPlaying 状态（悬浮窗停止/开始按钮切换修复）。
      *  另加「启动中」态：转码/解封装期间 isPlaying 仍为 false，若只按 isPlaying 画，用户点了播放
-     *  按钮会看到图标毫无变化（长曲解码要几秒甚至几十秒）——此时画暂停图标并压暗，表示已受理、正在起播。 */
-    private static void syncPlayButton(ImageButton btn) {
+     *  按钮会看到图标毫无变化（长曲解码要几秒甚至几十秒）——此时画暂停图标并压暗，表示已受理、正在起播。
+     *  <p>
+     *  <b>必须改 style 而不是子 Image</b>：arc 的 {@code ImageButton.draw()} 每帧先调 {@code updateImage()}，
+     *  它会把子 Image 的 drawable / color 用 {@code style.imageUp / imageUpColor / imageChecked…} 重新覆盖一遍
+     *  （反编译确认 {@code Image.setDrawable} 就在 updateImage 内）。所以此前所有
+     *  {@code btn.getImage().setDrawable(...)} 都在下一帧被打回去——这就是「按钮图标永远不变」的真正原因。
+     *  这些按钮在创建时都带了自己的一份 style 副本（{@link #playStyle}），改它不会影响别的按钮。
+     */
+    public static void applyPlayIcon(ImageButton btn) {
         boolean p = MusicPlayer.isPlaying();
         boolean starting = !p && MusicPlayer.isStarting();
-        if (btn.getImage() == null) return;
-        btn.getImage().setDrawable(p || starting ? Icon.pause : Icon.play);
-        btn.getImage().setColor(p ? Pal.accent : (starting ? Color.lightGray : Color.white));
+        arc.scene.style.Drawable icon = (p || starting) ? Icon.pause : Icon.play;
+        arc.graphics.Color color = p ? Pal.accent : (starting ? Color.lightGray : Color.white);
+        // 1) 该按钮自己的 style 副本（draw 每帧从它取值）
+        arc.scene.ui.ImageButton.ImageButtonStyle st = btn.getStyle();
+        if (st != null) {
+            st.imageUp = icon;
+            st.imageOver = icon;
+            st.imageDown = icon;
+            st.imageUpColor = color;
+            st.imageOverColor = color;
+            st.imageDownColor = color;
+        }
+        // 2) 兜底：子 Image 也设一遍（arc 若在别的路径直接画子元素时同样正确）
+        if (btn.getImage() != null) {
+            btn.getImage().setDrawable(icon);
+            btn.getImage().setColor(color);
+        }
+    }
+
+    /** 给播放/暂停类按钮做一份**独立的 style 副本**：图标要动态改，而 Styles.flati/cleari 是全局共享的，
+     *  直接改会污染所有用它的按钮。 */
+    static arc.scene.ui.ImageButton.ImageButtonStyle playStyle(arc.scene.ui.ImageButton.ImageButtonStyle base) {
+        arc.scene.ui.ImageButton.ImageButtonStyle st = new arc.scene.ui.ImageButton.ImageButtonStyle(base);
+        st.imageUp = Icon.play; // 初始占位，随后由 syncPlayButton 按真实状态覆盖
+        st.imageOver = st.imageUp;
+        st.imageDown = st.imageUp;
+        st.imageChecked = null;
+        return st;
     }
 
     /**
@@ -409,13 +441,13 @@ public class MusicBar {
      * 收起/展开两个播放按钮都在这里统一刷，切换状态立刻反映到图标与颜色。
      */
     public static void syncNow() {
-        if (playBtn != null) syncPlayButton(playBtn);
-        if (collapsedBtn != null) syncPlayButton(collapsedBtn);
+        if (playBtn != null) applyPlayIcon(playBtn);
+        if (collapsedBtn != null) applyPlayIcon(collapsedBtn);
     }
 
     /** 每帧把播放态同步到按钮图标（相比只在变化时更新，能兜底一切异步建源/暂停/停止路径） */
     private static void playButtonFrameSync(ImageButton btn) {
-        btn.update(() -> syncPlayButton(btn));
+        btn.update(() -> applyPlayIcon(btn));
     }
 
     /** 悬浮条/弹窗共用的可拖动进度条（内联 update+changed 监听，返回构造好的 Slider）；
