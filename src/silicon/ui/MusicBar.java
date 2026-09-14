@@ -329,8 +329,8 @@ public class MusicBar {
         diagBar();
     }
 
-    /** 诊断输出：同时进日志与 {@code silicon-musicbar.log}（追加，不会被下次启动覆盖） */
-    private static void diag(String msg) {
+    /** 诊断输出（包内可见，弹窗也在用）：同时进日志与 {@code silicon-musicbar.log}（追加，不会被下次启动覆盖） */
+    static void diag(String msg) {
         Log.info("[Music] bar " + msg);
         try {
             Core.files.local("silicon-musicbar.log").writeString(msg + "\n", true);

@@ -482,9 +482,29 @@ public class MusicPlayerDialog extends BaseDialog {
             try {
                 if (cont.getHeight() <= 0f || pane.getHeight() <= 0f) return; // 首帧还没布局
                 float screenPx = Core.graphics.getHeight();
-                float otherPx = cont.getHeight() - pane.getHeight();          // 其它行占用（像素）
-                float targetPx = Math.max(210f, Math.min(screenPx - 48f, screenPx - otherPx - 48f));
+                // 其它行占用 = cont 里除列表外**各子元素的实际高度之和**。
+                // 不能用 cont.getHeight()-pane.getHeight()：实测 ScrollPane.getHeight() 并不是它格子的高度
+                // （cell=616px 时它报 150px），那样算出来的 other 会被虚高 1800+px，列表反被压到最小。
+                float otherPx = 0f;
+                StringBuilder rows = new StringBuilder();
+                for (arc.scene.Element e : cont.getChildren()) {
+                    if (e == pane) continue;
+                    otherPx += e.getHeight();
+                    rows.append(' ').append(e.getClass().getSimpleName()).append('=').append((int) e.getHeight());
+                }
+                if (otherPx < 100f) return; // 各行为 0：还没完成首次布局，别套用错误值（否则弹窗会先跳一下）
+                // 窗口自身开销 = 标题栏 + 底部按钮行 + 边距：它们不在 cont 里，必须一起算，
+                // 否则总高会超过屏幕（实测 contH 2108 > 屏幕 2054，列表底部被切掉）。
+                float overhead = Math.max(0f, getHeight() - cont.getHeight());
+                // 末尾再留出**一行曲目**的空隙（用户要求「留一行空隙」）：一行 = 44 cell 单位 × Scl
+                float oneRowPx = 44f * Scl.scl(1f);
+                float avail = screenPx - overhead - otherPx - 32f - oneRowPx;
+                float targetPx = Math.max(210f, avail);
                 if (Math.abs(targetPx - listPx[0]) > 6f) {                    // 变化不大就不动，避免每帧重排
+                    MusicBar.diag("list height: screen=" + (int) screenPx + " contH=" + (int) cont.getHeight()
+                            + " overhead=" + (int) overhead + " other=" + (int) otherPx
+                            + " -> target=" + (int) targetPx + " (cell=" + (int) (targetPx / Scl.scl(1f)) + ")"
+                            + " rows:" + rows);
                     listPx[0] = targetPx;
                     paneCell.height(targetPx / Scl.scl(1f));
                 }
