@@ -566,6 +566,20 @@ public class MusicPlayer {
         }
     }
 
+    /** 按专辑名把某曲目 hash 移出专辑（供多选弹窗「取消勾选即移除」用） */
+    public static void removeTrackHashFromAlbum(String albumName, String hash) {
+        if (albumName == null || albumName.trim().isEmpty() || hash == null || hash.isEmpty()) return;
+        boolean changed = false;
+        for (Album a : albums) {
+            if (a == null || !albumName.equals(a.name) || a.hashes == null) continue;
+            if (a.hashes.remove(hash)) changed = true;
+        }
+        if (changed) {
+            saveAlbums();
+            shuffleDirty = true;
+        }
+    }
+
     public static void removeFromAlbum(int albumIndex, int trackIndex) {
         Album a = album(albumIndex);
         if (a == null || trackIndex < 0 || trackIndex >= tracks.size || a.hashes == null) return;
@@ -1103,7 +1117,31 @@ public class MusicPlayer {
 
     /** 内置曲目 key 列表（供 UI 内置曲目选择器使用） */
     public static String[] internalKeys() {
-        return INTERNAL_KEYS.clone();
+        // 只返回**当前游戏版本里真的存在**的内置曲目：INTERNAL_KEYS 是硬编码名单，
+        // 换游戏版本后可能多/少（例如某首被删掉），不过滤就会出现「点了没反应」的空条目。
+        Seq<String> ok = new Seq<>();
+        for (String k : INTERNAL_KEYS) {
+            if (internalExists(k)) ok.add(k);
+        }
+        return ok.toArray(String.class);
+    }
+
+    /** 该内置曲目在当前游戏里是否真的存在：Musics 里有这个字段，且资源能取到（不是 null） */
+    public static boolean internalExists(String key) {
+        if (key == null || key.isEmpty()) return false;
+        try {
+            java.lang.reflect.Field f = Class.forName("mindustry.gen.Musics").getField(key);
+            Object v = f.get(null);
+            if (v == null) return false;
+            try {
+                java.lang.reflect.Method m = v.getClass().getMethod("get");
+                return m.invoke(v) != null; // MusicContainer.get() → arc.audio.Music
+            } catch (NoSuchMethodException e) {
+                return true; // 该版本里直接就是 Music 对象：字段存在即视为存在
+            }
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     public static int currentIndex() {
@@ -1120,15 +1158,39 @@ public class MusicPlayer {
 
     /** 确保内置曲目存在（ClientLoadEvent 时调用，保证 Musics.* 已 load）；逐 key 补齐，删除单首内置后也能恢复 */
     public static void ensureInternalTracks() {
-        boolean added = false;
-        for (String key : INTERNAL_KEYS) {
+        boolean changed = false;
+        // 1) 补齐当前版本存在的内置曲目
+        for (String key : internalKeys()) {
             String h = "int-" + key;
             if (indexOfHash(h) < 0) {
                 tracks.add(new MusicTrack(MusicTrack.INTERNAL, key, key, h, "musicplayer.type.internal"));
-                added = true;
+                changed = true;
             }
         }
-        if (added) saveTracks();
+        // 2) 清掉**当前游戏里已不存在**的内置曲目（换版本/某些曲目被移除时，旧条目会一直挂在
+        //    「全部曲目」里，点了没声音）；同时把专辑里指向它们的 hash 一起清掉，避免专辑出现死项。
+        for (int i = tracks.size - 1; i >= 0; i--) {
+            MusicTrack t = tracks.get(i);
+            if (t == null || !t.isInternal()) continue;
+            String key = t.source != null ? t.source : t.name;
+            if (internalExists(key)) continue;
+            String h = t.cacheHash;
+            tracks.remove(i);
+            changed = true;
+            if (h != null) {
+                for (Album a : albums) {
+                    if (a != null && a.hashes != null) a.hashes.remove(h);
+                }
+            }
+            // 正在播放这首被清掉的曲目时停止播放，避免 curren 指向已移除条目
+            if (current >= tracks.size) current = -1;
+            SiliconLog.log("pruned missing internal track: " + key);
+        }
+        if (changed) {
+            saveTracks();
+            saveAlbums();
+            shuffleDirty = true;
+        }
     }
 
     static int indexOfHash(String hash) {

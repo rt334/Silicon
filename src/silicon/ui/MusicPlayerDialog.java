@@ -964,11 +964,16 @@ public class MusicPlayerDialog extends BaseDialog {
         dlg.buttons.add(textBtn(Core.bundle.get("musicplayer.confirm"), () -> {
             int firstIdx = -1;
             for (int i = 0; i < keys.length; i++) {
-                if (!checked[i]) continue;
                 MusicTrack t = MusicPlayer.trackByHash("int-" + keys[i]);
                 if (t == null) continue;
-                if (filterAlbum != null) MusicPlayer.addTrackHashToAlbum(filterAlbum, t.cacheHash);
-                if (firstIdx < 0) firstIdx = MusicPlayer.tracks().indexOf(t);
+                if (filterAlbum != null) {
+                    // **两个方向都要处理**：勾选 → 加入专辑；取消勾选 → 从专辑移除。
+                    // 上一版只处理勾选项（if (!checked[i]) continue），导致「取消勾选后不会从专辑删除」。
+                    boolean was = isInAlbum(filterAlbum, t.cacheHash);
+                    if (checked[i] && !was) MusicPlayer.addTrackHashToAlbum(filterAlbum, t.cacheHash);
+                    else if (!checked[i] && was) MusicPlayer.removeTrackHashFromAlbum(filterAlbum, t.cacheHash);
+                }
+                if (checked[i] && firstIdx < 0) firstIdx = MusicPlayer.tracks().indexOf(t);
             }
             dlg.hide();
             if (filterAlbum != null) rebuildRows();
