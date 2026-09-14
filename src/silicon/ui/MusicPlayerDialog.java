@@ -274,9 +274,16 @@ public class MusicPlayerDialog extends BaseDialog {
         albumScroll.setScrollingDisabled(false, true); // 允许横向滚动、禁止纵向
         albumScroll.setFadeScrollBars(false);
         cont.add(albumScroll).growX().height(BTN_H + 12f).padTop(6f).row();
-        // 新专辑按钮固定在这一行右端（不随专辑数左右移动）
+        // 新专辑按钮固定在这一行右端（不随专辑数左右移动）；选中专辑时多一个「从列表选取曲目」入口
         cont.table(row -> {
             row.add().growX();
+            if (filterAlbum != null) {
+                final String target = filterAlbum;
+                TextButton pick = textBtn(Core.bundle.get("musicplayer.pickTracks"), () -> albumPickTracksDialog(target));
+                pick.addListener(new Tooltip(t -> t.background(Styles.black6).margin(4f)
+                        .add(Core.bundle.get("musicplayer.pickTracksHint", "从曲目列表多选加入/移出「" + target + "」"))));
+                row.add(pick).height(BTN_H).padRight(6f);
+            }
             row.button(Icon.add, Styles.cleari, this::newAlbumDialog).size(30f).padLeft(4f);
         }).growX().padTop(2f).row();
 
@@ -684,6 +691,72 @@ public class MusicPlayerDialog extends BaseDialog {
     }
 
     /** 专辑归属菜单：把当前曲目加入/移出某个专辑 */
+    /**
+     * 从曲目列表**多选**加入/移出指定专辑（用户需求：选好专辑后，从音乐播放器列表里挑曲）。
+     * <p>
+     * 交互：每首一行勾选框，进入时按「已在专辑里」预勾选；确定时一次性应用差异
+     * （新勾的加入、取消勾的移出），因此这个弹窗同时充当「批量加」和「批量移出」。
+     */
+    private void albumPickTracksDialog(String albumName) {
+        if (albumName == null) return;
+        int ai = -1;
+        Seq<MusicPlayer.Album> albums = MusicPlayer.albums();
+        for (int i = 0; i < albums.size; i++) {
+            if (albumName.equals(albums.get(i).name)) { ai = i; break; }
+        }
+        if (ai < 0) return;
+        final int albumIdx = ai;
+        final Seq<MusicTrack> all = MusicPlayer.tracks();
+
+        BaseDialog dlg = new BaseDialog(Core.bundle.get("musicplayer.pickTracks"));
+        Table list = new Table();
+        list.top();
+        list.defaults().pad(2f).left();
+        final boolean[] checked = new boolean[all.size];
+        final Seq<CheckBox> boxes = new Seq<>();
+        for (int i = 0; i < all.size; i++) {
+            MusicTrack t = all.get(i);
+            checked[i] = isInAlbum(albumName, t.cacheHash);
+            final int idx = i;
+            CheckBox cb = new CheckBox(t.name == null ? "?" : t.name);
+            cb.setChecked(checked[i]);
+            cb.changed(() -> checked[idx] = cb.isChecked());
+            boxes.add(cb);
+            list.add(cb).growX().row();
+        }
+        if (all.size == 0) list.add(Core.bundle.get("musicplayer.empty")).color(Color.lightGray).pad(10f);
+
+        dlg.cont.add(Core.bundle.get("musicplayer.importToAlbum") + ": [accent]"
+                + albumName.replace("[", "[[").replace("]", "]]") + "[]").pad(8f).row();
+        ScrollPane pane = new ScrollPane(list, Styles.defaultPane);
+        pane.setFadeScrollBars(false);
+        dlg.cont.add(pane).growX().height(320f).pad(4f).row();
+        dlg.cont.table(row -> {
+            row.defaults().height(BTN_H).pad(2f);
+            row.add(textBtn(Core.bundle.get("musicplayer.selectAll"), () -> {
+                for (int i = 0; i < checked.length; i++) { checked[i] = true; boxes.get(i).setChecked(true); }
+            })).growX();
+            row.add(textBtn(Core.bundle.get("musicplayer.selectNone"), () -> {
+                for (int i = 0; i < checked.length; i++) { checked[i] = false; boxes.get(i).setChecked(false); }
+            })).growX();
+        }).growX().padTop(4f).row();
+        // 确定：按勾选状态应用差异（只动真正变化的项，避免无谓的保存/洗牌）
+        dlg.buttons.defaults().height(BTN_H).width(120f).pad(4f);
+        dlg.buttons.add(textBtn(Core.bundle.get("musicplayer.confirm"), () -> {
+            for (int i = 0; i < all.size; i++) {
+                MusicTrack t = all.get(i);
+                boolean was = isInAlbum(albumName, t.cacheHash);
+                if (checked[i] && !was) MusicPlayer.addToAlbum(albumIdx, i);
+                else if (!checked[i] && was) MusicPlayer.removeFromAlbum(albumIdx, i);
+            }
+            dlg.hide();
+            rebuildRows();
+        }));
+        dlg.buttons.add(textBtn(Core.bundle.get("universal-junction.cancel", "取消"), dlg::hide));
+        dlg.closeOnBack();
+        dlg.show();
+    }
+
     private void albumAssignDialog(int trackIndex) {
         BaseDialog dlg = new BaseDialog(Core.bundle.get("musicplayer.addToAlbum"));
         Table list = new Table();
