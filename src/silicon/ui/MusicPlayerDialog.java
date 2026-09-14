@@ -471,21 +471,22 @@ public class MusicPlayerDialog extends BaseDialog {
         pane.setScrollingDisabled(true, false);
         pane.setFadeScrollBars(false);
         // 曲目列表吃满剩余高度 → 弹窗一直撑到接近屏幕底部（用户要求）。
-        // 初始给一个屏幕 30% 的估计值，之后**每帧按「其它行的实际 pref」反推可用高度**：
-        //   可用 = 屏幕高 - 其它行占用 - 余量
-        // 这样不必硬编码各行的尺寸（增删按钮也不会失配），也不会把弹窗顶出屏幕
-        // （注意 Cell.height 内部还会乘一次 Scl，所以这里一律用 cell 单位）。
-        final float[] listH = {Math.max(140f, Math.min(420f, Core.graphics.getHeight() / Scl.scl(1f) * 0.30f))};
-        final arc.scene.ui.layout.Cell<?> paneCell = cont.add(pane).growX().height(listH[0]).padTop(2f);
+        // 关键：**全程用像素算**，最后再换算成 cell 单位——因为 Cell.height(x) 内部还会乘一次 Scl.scl()，
+        // 混用单位会把列表设成远大于屏幕的高度（实测：弹窗比屏幕还高、看起来"更高了却仍没到底"）。
+        // 可用高度 = 屏幕高 - 其它行实际占用 - 上下留白；其它行的实际高度不受列表高度影响，所以这个反推是稳的。
+        final float[] listPx = {Math.max(210f, Core.graphics.getHeight() * 0.30f)};
+        final arc.scene.ui.layout.Cell<?> paneCell = cont.add(pane).growX()
+                .height(listPx[0] / Scl.scl(1f)).padTop(2f);
         paneCell.row();
         update(() -> {
             try {
-                float screenH = Core.graphics.getHeight() / Scl.scl(1f);   // 屏幕高（cell 单位）
-                float other = cont.getPrefHeight() - listH[0];             // 其它行占用（其余行的 pref 与列表高度无关）
-                float target = Math.max(140f, Math.min(screenH - 24f, screenH - other - 16f));
-                if (Math.abs(target - listH[0]) > 4f) {                    // 变化不大就不动，避免每帧重排
-                    listH[0] = target;
-                    paneCell.height(target);
+                if (cont.getHeight() <= 0f || pane.getHeight() <= 0f) return; // 首帧还没布局
+                float screenPx = Core.graphics.getHeight();
+                float otherPx = cont.getHeight() - pane.getHeight();          // 其它行占用（像素）
+                float targetPx = Math.max(210f, Math.min(screenPx - 48f, screenPx - otherPx - 48f));
+                if (Math.abs(targetPx - listPx[0]) > 6f) {                    // 变化不大就不动，避免每帧重排
+                    listPx[0] = targetPx;
+                    paneCell.height(targetPx / Scl.scl(1f));
                 }
             } catch (Throwable ignored) {
             }
