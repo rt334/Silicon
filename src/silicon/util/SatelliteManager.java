@@ -144,12 +144,38 @@ public class SatelliteManager {
         producingTypeMirror.clear();
     }
 
-    /** 世界加载完成后对账（WorldLoadEvent + app.post 延迟一拍 + 控制器节流兜底）：
-     *  给"有实体无名册"的卫星补建未绑定记录（名册丢失兜底，如旧版本存档），然后向在场队伍广播镜像。
-     *  注意：不剪除"无实体"的名册记录——存档两侧 unitId 均保留、击落由 UnitDestroyEvent 除名、
-     *  跨局由 ResetEvent 清空；且存档读入时 WorldLoadEvent 早于单位读入（units 在 entities 区域），
-     *  此刻按 getByID 剪除只会误杀刚从控制台恢复的名册（卫星冻结+无信号的读档 bug） */
+    /** 世界加载完成后对账（WorldLoadEvent + app.post 延迟一拍 + 控制器节流兜底）。
+     *  <p>WorldLoadEvent 那次**不能剪除**记录：存档读入顺序是 map → entities，该事件在 map 结束时
+     *  就触发，此刻单位实体还没读入，按 getByID 剪除会误杀刚从控制台恢复的名册（卫星冻结+无信号的
+     *  读档 bug）。真正生效的对账走 {@code Core.app.post(() -> onWorldLoaded(true))}——那一拍 entities
+     *  区域已读完，可以安全剪除死记录。 */
     public static void onWorldLoaded() {
+        onWorldLoaded(false);
+    }
+
+    /**
+     * @param pruneDead true 时剪除「名册有记录、但实体已不存在」的行。
+     *                  只能在单位读入完成后调用（见 {@link #onWorldLoaded()}），否则会误杀。
+     *                  实体被击落的正常路径由 {@link #onUnitDestroyed} 除名；这里是兜底：
+     *                  存档 entity id 重复被引擎重新分配（SaveVersion.java:503-514）等异常情况下，
+     *                  旧记录会永久残留并使 launchedCount 虚高。
+     */
+    public static void onWorldLoaded(boolean pruneDead) {
+        // 只在权威端剪除：客机名册是广播镜像（applyState 每次整表替换，本就会清掉死行），
+        // 而客机的单位是随后才陆续同步到的——抢在实体到位前剪除只会让覆盖显示短暂空窗。
+        if (pruneDead && isAuthority()) {
+            // 先快照键再改表（ObjectMap.keys() 是视图，迭代中 remove 不安全）
+            Seq<Team> owners = new Seq<>();
+            satRecords.each((t, l) -> owners.add(t));
+            for (Team t : owners) {
+                Seq<SatelliteRecord> list = satRecords.get(t);
+                if (list == null) continue;
+                for (int i = list.size - 1; i >= 0; i--) {
+                    if (Groups.unit.getByID(list.get(i).unitId) == null) list.remove(i);
+                }
+                if (list.isEmpty()) satRecords.remove(t);
+            }
+        }
         for (Unit u : Groups.unit) {
             if (u.controller() instanceof OrbitSatelliteController && recordOf(u.id) == null) {
                 SatelliteRecord r = new SatelliteRecord();

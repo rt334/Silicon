@@ -138,6 +138,43 @@ public class SignalChannel {
     private static final float[] aciA = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final float[] jamA = new float[SignalJammer.CHANNEL_MAX + 1];
 
+    /**
+     * 单台干扰器按「同信道 + 邻信道泄漏（ACIR_jam）」累加进 out[1..CHANNEL_MAX]。
+     * 卫星层与地面层共用本方法，避免两层各写一份导致口径分叉（曾出现地面求和/卫星取最大的不一致）。
+     */
+    private static void addJammer(int jamChannel, float j, float[] out) {
+        if (jamChannel == SignalJammer.ALL) {
+            for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) out[ch] += j;
+            return;
+        }
+        int c = jamChannel;
+        out[c] += j;
+        if (c > 1) out[c - 1] += j * acirJam(1);
+        if (c < SignalJammer.CHANNEL_MAX) out[c + 1] += j * acirJam(1);
+        if (c > 2) out[c - 2] += j * acirJam(2);
+        if (c < SignalJammer.CHANNEL_MAX - 1) out[c + 2] += j * acirJam(2);
+    }
+
+    /** 单信道干扰查询的静态缓冲（同一时刻只被 {@link #jammerAt} 使用，不与 effectiveAll 的批量缓冲冲突） */
+    private static final float[] jamTmp = new float[SignalJammer.CHANNEL_MAX + 1];
+
+    /**
+     * 指定信道在 (wx,wy) 处的干扰总和（干扰器功率求和 + 邻信道泄漏；含全信道干扰器、不分队伍）。
+     * <b>与 {@link #effectiveAll} 的 jamA 同一算法</b>——卫星层（{@link silicon.util.SatelliteManager#satelliteEffAt}）
+     * 走本方法，地面层走批量版，两层口径必须一致：多台干扰器叠加压制，而不是只取最强一台。
+     */
+    public static float jammerAt(int channel, float wx, float wy) {
+        if (channel < 1 || channel > SignalJammer.CHANNEL_MAX) return 0f;
+        for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) jamTmp[ch] = 0f;
+        for (SignalJammer.SignalJammerBuild jb : SignalJammer.allJammers()) {
+            if (!jb.enabled) continue; // 关闭（enabled=false）不发射干扰
+            float j = SignalSource.strengthAt(jb.x, jb.y, wx, wy);
+            if (j <= 0f) continue;
+            addJammer(jb.jamChannel, j, jamTmp);
+        }
+        return jamTmp[channel];
+    }
+
     /** 将某源信号按信道分摊：本信道按身份计入 best/other，邻信道计入 ACI */
     private static void addSource(int ch, float s, String id, Building src) {
         if (ch < 1 || ch > SignalJammer.CHANNEL_MAX) return;
@@ -202,19 +239,12 @@ public class SignalChannel {
         // 干扰器（全局：敌方干扰器同样压制本信道；同信道 + 邻信道泄漏）
         // enabled 守卫与 SignalJammer.strengthAt 口径一致:关闭(enabled=false)不发射干扰——
         // 否则 H 覆盖中同一干扰器在信道层"仍在压制"、卫星层却已消失,自相矛盾
+        // 累加逻辑统一走 addJammer（与卫星层的 jammerAt 共用同一份实现）
         for (SignalJammer.SignalJammerBuild jb : SignalJammer.allJammers()) {
             if (!jb.enabled) continue;
             float j = SignalSource.strengthAt(jb.x, jb.y, wx, wy);
-            if (jb.jamChannel == SignalJammer.ALL) {
-                for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) jamA[ch] += j;
-            } else {
-                int c = jb.jamChannel;
-                jamA[c] += j;
-                if (c > 1) jamA[c - 1] += j * acirJam(1);
-                if (c < SignalJammer.CHANNEL_MAX) jamA[c + 1] += j * acirJam(1);
-                if (c > 2) jamA[c - 2] += j * acirJam(2);
-                if (c < SignalJammer.CHANNEL_MAX - 1) jamA[c + 2] += j * acirJam(2);
-            }
+            if (j <= 0f) continue;
+            addJammer(jb.jamChannel, j, jamA);
         }
         // 每信道有效信号 = 信号功率 × 质量因子(SINR)：干扰压信噪比，不从幅度扣功率
         for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {

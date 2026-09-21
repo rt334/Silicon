@@ -112,7 +112,9 @@ public class Silicon extends Mod {
             // 名册↔卫星实体对账：存档读入时 WorldLoadEvent 早于单位读入（readMap→endMapLoad→readEntities），
             // 此刻 Groups.unit 还没有卫星，这里的调用只覆盖"实体先于事件"的路径（如直接进新图）
             SatelliteManager.onWorldLoaded();
-            Core.app.post(SatelliteManager::onWorldLoaded); // 存档读档真正生效的对账：entities 区域已读完
+            // 存档读档真正生效的对账：entities 区域已读完（WorldLoadEvent 早于单位读入），
+            // 因此这一拍可以顺带剪除「名册有记录但实体不存在」的死行
+            Core.app.post(() -> SatelliteManager.onWorldLoaded(true));
             SignalOverlay.reset(); // 清颜色缓存/色相分配/显示状态，防跨世界累积
         });
         // 卫星实体被击落（伤害仅可能来自 scripted unit.damage()）→ 名册除名并广播
