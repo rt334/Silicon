@@ -331,16 +331,8 @@ public class SignalRelay extends Block {
             Draw.reset();
         }
 
-        /** 选中显示：仅保留原版 bar（生命/电力）+ 信号唯一编号（绑定源编号）+ 实时转发状态 */
-        @Override
-        public void display(Table table) {
-            super.display(table);
-            table.row();
-            table.label(() -> Core.bundle.format("block.silicon-signal-relay.source.current",
-                    selectedSource == null || selectedSource.isEmpty() ? Core.bundle.get("block.silicon-signal-relay.nobind") : selectedSource)).pad(2f);
-            table.row();
-            table.label(() -> statusText()).pad(2f);
-        }
+        // 悬停信息面板不再追加自定义行：只保留原版 bar（生命/电力）。
+        // 绑定编号与实时转发状态仍在配置面板里显示（statusText），悬停面板保持与原版方块一致。
 
         /** 存档版本：2 = bool(active) + i(channel) + str(selectedSource)；覆写 version() 使读档时绑定/信道不丢失 */
         @Override

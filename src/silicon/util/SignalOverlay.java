@@ -402,11 +402,14 @@ public class SignalOverlay {
         Building[] bestSrc = bestSrcTmp;
         String[] bestCode = bestCodeTmp;
         try {
-            // 单字符居中偏移：相对原 0.2 字号的 1/1.6，按当前字号比例缩放
+            // 格子中心：tile 索引 gx 覆盖世界坐标 [gx*8, gx*8+8)，中心即 +4 —— 采样与绘字都用它。
+            // 横向按字体度量居中（步进 × 位数，1/2 位数都居中）；纵向沿用原基准字号的 -1.6 偏移（k 为字号倍率）
+            float cell = 8f, half = cell / 2f;
             float k = scale / 0.2f;
+            float adv = Fonts.def.getData().getGlyph('0').xadvance;
             for (int gx = x0; gx <= x1; gx++) {
                 for (int gy = y0; gy <= y1; gy++) {
-                    float wx = gx * 8f, wy = gy * 8f; // 格子中心（像素）
+                    float wx = gx * cell + half, wy = gy * cell + half; // 格子中心（像素）
                     float s = bestSignal(team, wx, wy, bestSrc, bestCode, viewCode);
                     if (s <= 0f) continue;
                     int val = Mathf.round(s);
@@ -418,10 +421,10 @@ public class SignalOverlay {
                         satelliteColor(bestCode[0], t, Tmp.c1);
                     }
                     Tmp.c1.a((0.6f + 0.4f * t) * digitAlpha * alpha);
-                    // 复用预计算字符串避免分配；居中偏移随字号缩放，并按位数补偿（0~99 有两位数字）
+                    // 复用预计算字符串避免分配
                     String num = NUMBER_STRINGS[Mathf.clamp(val, 0, SignalSource.MAX_STRENGTH)];
                     Fonts.def.setColor(Tmp.c1);
-                    Fonts.def.draw(num, wx - (1f + (num.length() - 1) * 1.2f) * k, wy - 1.6f * k);
+                    Fonts.def.draw(num, wx - adv * num.length() * 0.5f, wy - 1.6f * k);
                 }
             }
         } finally {
@@ -447,7 +450,8 @@ public class SignalOverlay {
         String[] bestCode = bestCodeTmp;
         for (int gx = x0; gx <= x1; gx++) {
             for (int gy = y0; gy <= y1; gy++) {
-                float wx = gx * 8f, wy = gy * 8f; // 格子中心（像素）
+                // 格子中心（+4）：Fill.rect 以中心为锚，采样点也取中心，格子与世界格网对齐
+                float wx = gx * 8f + 4f, wy = gy * 8f + 4f;
                 float s = bestSignal(team, wx, wy, bestSrc, bestCode, viewCode);
                 if (s <= 0f) continue;
                 float t = s / SignalSource.MAX_STRENGTH;
