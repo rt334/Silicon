@@ -134,9 +134,15 @@ public class SignalChannel {
     private static final float[] bestA = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final Building[] bestSrcA = new Building[SignalJammer.CHANNEL_MAX + 1];
     private static final String[] bestIdA = new String[SignalJammer.CHANNEL_MAX + 1];
+    /** 每信道最强身份对应的编码（"S"+编码 身份的第一个字符是 'S'；未绑定中继的 "R<pos>" 身份为 null） */
+    private static final String[] bestCodeA = new String[SignalJammer.CHANNEL_MAX + 1];
     private static final float[] otherA = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final float[] aciA = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final float[] jamA = new float[SignalJammer.CHANNEL_MAX + 1];
+    /** 指定编码视图：该编码在本信道的最强功率 / 其余全部身份的功率和 / 该编码最强那一台的建筑 */
+    private static final float[] viewA = new float[SignalJammer.CHANNEL_MAX + 1];
+    private static final float[] viewOtherA = new float[SignalJammer.CHANNEL_MAX + 1];
+    private static final Building[] viewSrcA = new Building[SignalJammer.CHANNEL_MAX + 1];
 
     /**
      * 单台干扰器按「同信道 + 邻信道泄漏（ACIR_jam）」累加进 out[1..CHANNEL_MAX]。
@@ -175,8 +181,14 @@ public class SignalChannel {
         return jamTmp[channel];
     }
 
-    /** 将某源信号按信道分摊：本信道按身份计入 best/other，邻信道计入 ACI */
-    private static void addSource(int ch, float s, String id, Building src) {
+    /** 身份串 → 编码：源/中继的身份是 "S"+编码；"R<pos>"（未绑定中继）等无编码身份返回 null */
+    static String codeOfId(String id) {
+        return (id != null && id.length() > 1 && id.charAt(0) == 'S') ? id.substring(1) : null;
+    }
+
+    /** 将某源信号按信道分摊：本信道按身份计入 best/other，邻信道计入 ACI；
+     *  viewId 非 null 时额外统计「该编码自身功率 / 其余身份功率和」（覆盖与频谱的按编码视图用） */
+    private static void addSource(int ch, float s, String id, Building src, String viewId) {
         if (ch < 1 || ch > SignalJammer.CHANNEL_MAX) return;
         if (ch > 1) aciA[ch - 1] += s * acir(1);
         if (ch < SignalJammer.CHANNEL_MAX) aciA[ch + 1] += s * acir(1);
@@ -187,14 +199,28 @@ public class SignalChannel {
             if (s > bestA[ch]) {
                 bestA[ch] = s;
                 bestSrcA[ch] = src;
+                bestCodeA[ch] = codeOfId(id);
             }
         } else if (s > bestA[ch]) {
             otherA[ch] += bestA[ch];
             bestA[ch] = s;
             bestIdA[ch] = id;
             bestSrcA[ch] = src;
+            bestCodeA[ch] = codeOfId(id);
         } else {
             otherA[ch] += s;
+        }
+        // 指定编码视图：本编码取最强（同码多台视为同一路信号），其余身份（含当前最强那一路）
+        // 全部计入该编码面对的 CCI——这样显示出的强度就是该编码在该点真实可用的强度
+        if (viewId != null) {
+            if (id.equals(viewId)) {
+                if (s > viewA[ch]) {
+                    viewA[ch] = s;
+                    viewSrcA[ch] = src;
+                }
+            } else {
+                viewOtherA[ch] += s;
+            }
         }
     }
 
@@ -205,7 +231,7 @@ public class SignalChannel {
      * 比逐信道调用 effective 快约 5 倍（覆盖绘制用）。
      */
     public static void effectiveAll(Team team, float wx, float wy, float[] effOut, Building[] srcOut) {
-        effectiveAll(team, wx, wy, effOut, srcOut, null);
+        effectiveAll(team, wx, wy, effOut, srcOut, null, null, null);
     }
 
     /**
@@ -213,19 +239,40 @@ public class SignalChannel {
      * 频谱面板用它区分"本点干扰功率"与"可用有效强度"；传 null 等价于无干扰输出。
      */
     public static void effectiveAll(Team team, float wx, float wy, float[] effOut, Building[] srcOut, float[] intOut) {
+        effectiveAll(team, wx, wy, effOut, srcOut, intOut, null, null);
+    }
+
+    /**
+     * 全参数版：支持"按编码计算"。
+     *
+     * @param codeOut  出参（可 null）：每信道结果所属的编码——viewCode 为 null 时是该信道最强身份的编码
+     *                 （未绑定中继等无编码身份为 null）；viewCode 非 null 时即 viewCode
+     * @param viewCode 非 null/空时只算该编码：信号功率 = 该编码在本信道的最强一路（同码多台视为同一路），
+     *                 干扰 = 其余全部身份功率和 + 邻信道泄漏 + 干扰器。
+     *                 为 null 时沿用「本信道最强身份」语义（旧的全局视图）。
+     *                 <p>判定端（中继激活/绑定）本来就是逐编码的（{@link #inSignalRange} 按名字匹配），
+     *                 显示端用本参数对齐后，格子上的数字就是该编码真正可用的强度。
+     */
+    public static void effectiveAll(Team team, float wx, float wy, float[] effOut, Building[] srcOut,
+                                    float[] intOut, String[] codeOut, String viewCode) {
+        String viewId = (viewCode == null || viewCode.isEmpty()) ? null : "S" + viewCode;
         for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
             bestA[ch] = 0f;
             bestSrcA[ch] = null;
             bestIdA[ch] = null;
+            bestCodeA[ch] = null;
             otherA[ch] = 0f;
             aciA[ch] = 0f;
             jamA[ch] = 0f;
+            viewA[ch] = 0f;
+            viewOtherA[ch] = 0f;
+            viewSrcA[ch] = null;
         }
         // 信号源
         for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(team)) {
             float s = sb.strengthAt(wx, wy);
             if (s <= 0f) continue;
-            addSource(sb.channel, s, "S" + sb.signal.name, sb);
+            addSource(sb.channel, s, "S" + sb.signal.name, sb, viewId);
         }
         // 激活中继器（级联源；发射信道与所选信号源一致）
         for (SignalRelay.SignalRelayBuild rb : SignalRelay.allRelays(team)) {
@@ -234,7 +281,7 @@ public class SignalChannel {
             if (s <= 0f) continue;
             String id = (rb.selectedSource != null && !rb.selectedSource.isEmpty())
                     ? "S" + rb.selectedSource : "R" + ((int) rb.x * 7 + (int) rb.y * 13);
-            addSource(rb.signalChannel(), s, id, rb);
+            addSource(rb.signalChannel(), s, id, rb, viewId);
         }
         // 干扰器（全局：敌方干扰器同样压制本信道；同信道 + 邻信道泄漏）
         // enabled 守卫与 SignalJammer.strengthAt 口径一致:关闭(enabled=false)不发射干扰——
@@ -248,10 +295,13 @@ public class SignalChannel {
         }
         // 每信道有效信号 = 信号功率 × 质量因子(SINR)：干扰压信噪比，不从幅度扣功率
         for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
-            float i = NOISE_FLOOR + otherA[ch] + aciA[ch] + jamA[ch];
-            effOut[ch] = bestA[ch] * sinrQuality(bestA[ch], i);
-            srcOut[ch] = bestSrcA[ch];
+            boolean byCode = viewId != null;
+            float sig = byCode ? viewA[ch] : bestA[ch];
+            float i = NOISE_FLOOR + (byCode ? viewOtherA[ch] : otherA[ch]) + aciA[ch] + jamA[ch];
+            effOut[ch] = sig * sinrQuality(sig, i);
+            srcOut[ch] = byCode ? viewSrcA[ch] : bestSrcA[ch];
             if (intOut != null) intOut[ch] = i;
+            if (codeOut != null) codeOut[ch] = byCode ? viewCode : bestCodeA[ch];
         }
     }
 }

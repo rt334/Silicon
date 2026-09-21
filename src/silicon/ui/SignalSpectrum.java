@@ -54,6 +54,10 @@ public class SignalSpectrum {
     private static final float[] intBuf = new float[SignalJammer.CHANNEL_MAX + 1];
     @SuppressWarnings("unchecked")
     private static final Building[] srcBuf = new Building[SignalJammer.CHANNEL_MAX + 1];
+    /** 每信道结果所属编码（eff 为 0 时表示该信道没有地面信号） */
+    private static final String[] codeBuf = new String[SignalJammer.CHANNEL_MAX + 1];
+    /** 无编码视图下逐信道取最强卫星编码的出参复用 */
+    private static final String[] satCodeTmp = new String[1];
     /** 卫星层按信道聚合缓冲（sum/max 计 stackEff，cnt 计占用） */
     private static final float[] satSum = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final float[] satMax = new float[SignalJammer.CHANNEL_MAX + 1];
@@ -84,6 +88,11 @@ public class SignalSpectrum {
 
         spec.add(Core.bundle.get("block.silicon-signal.spectrum.title"))
                 .colspan(5).center().color(Pal.accent).padTop(6f).padBottom(1f);
+        spec.row();
+        // 聚合范围行：本面板的"可用强度"列按哪个口径算（源=自身编码 / 中继=绑定编码 / 检测器=逐信道最强编码）
+        LabelRef scopeRef = new LabelRef();
+        scopeRef.label = spec.add("").colspan(5).center().color(Color.lightGray).padBottom(2f).get();
+        scopeRef.label.setAlignment(arc.util.Align.center);
         spec.row();
         // 表头（与数据行同列宽）：显式 Label 且 setAlignment(center)——单元格内居中 + 标签文本内
         // 居中双重保障（仅靠 Cell.center() 实测未生效，见用户反馈）
@@ -150,8 +159,14 @@ public class SignalSpectrum {
             if (tick != 0) return;
             // 建筑可能在面板打开期间被摧毁——失效后立即停止采样（面板由 BlockConfigFragment 隐藏）
             if (at == null || !at.isValid()) return;
-            SignalChannel.effectiveAll(at.team, at.x, at.y, effBuf, srcBuf, intBuf);
-            // 卫星层按信道聚合：绑定信道的卫星各自 SINR 折算后对数叠加，再与地面 RSS 功率合成
+            // 聚合范围 = 本面板所属编码：信号源=自身编码、中继=绑定编码、检测器=无（逐信道最强编码）。
+            // 判定端（中继激活/控制台绑定）本来就是逐编码的，这里对齐后"可用强度"列就是该编码真实可用的值。
+            String scope = silicon.util.SignalOverlay.codeOf(at);
+            SignalChannel.effectiveAll(at.team, at.x, at.y, effBuf, srcBuf, intBuf, codeBuf, scope);
+            // 卫星层：
+            //  - 有编码视图：只叠该编码的卫星（同编码 sum/max → stackEff），再与同编码地面 RSS 合成；
+            //  - 无编码视图（检测器）：逐信道跟随该信道地面最强编码；该信道无地面信号时取该信道最强卫星编码。
+            //    两种情形都只涉及单一编码，不做跨编码求和（跨编码求和会算出任何中继都拿不到的强度）。
             for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
                 satSum[ch] = 0f;
                 satMax[ch] = 0f;
@@ -164,14 +179,19 @@ public class SignalSpectrum {
                 if (rc < 1 || rc > SignalJammer.CHANNEL_MAX) continue; // 未绑定卫星不进信道视图
                 float e = SatelliteManager.satelliteEffAt(r, at.x, at.y);
                 if (e <= 0f) continue;
+                satCnt[rc]++; // 占用列：全部编码（信道拥挤度）
+                if (scope != null && !scope.equals(r.code)) continue; // 强度列：仅当前编码
                 satSum[rc] += e;
                 if (e > satMax[rc]) satMax[rc] = e;
-                satCnt[rc]++;
             }
             int cur = currentChannel.get();
+            scopeRef.label.setText(scope == null
+                    ? Core.bundle.get("block.silicon-signal.spectrum.scope.auto")
+                    : Core.bundle.format("block.silicon-signal.spectrum.scope.code", scope));
             for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
                 int src = 0, jam = 0;
-                // 占用计数与实际发射条件一致（signal/供电/enabled），断电或关闭的源不计入
+                // 占用计数与实际发射条件一致（signal/供电/enabled），断电或关闭的源不计入；
+                // 占用是"信道拥挤度"（含所有编码与其他队伍的干扰器），与按编码的强度列口径不同
                 for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(at.team)) {
                     if (sb.emitting() && sb.channel == ch) src++;
                 }
@@ -184,8 +204,19 @@ public class SignalSpectrum {
                 }
                 // 卫星计入占用：与地面源一样占用信道带宽
                 src += satCnt[ch];
+                // 卫星层强度：永远只算一个编码——
+                //  有编码视图 → 该编码的卫星叠加结果；
+                //  无编码视图 → 跟随该信道地面最强编码；该信道无地面信号时取该信道最强卫星编码。
+                float s;
+                if (scope != null) {
+                    s = Math.max(0f, SatelliteManager.stackEff(satSum[ch], satMax[ch]));
+                } else if (codeBuf[ch] != null) {
+                    s = SatelliteManager.satelliteStrengthAt(at.team, codeBuf[ch], at.x, at.y);
+                } else {
+                    satCodeTmp[0] = null;
+                    s = SatelliteManager.bestSatelliteAt(at.team, at.x, at.y, satCodeTmp, ch);
+                }
                 // RSS 功率合成：total = √(g² + s²)
-                float s = Math.max(0f, SatelliteManager.stackEff(satSum[ch], satMax[ch]));
                 if (s > 0f) {
                     effBuf[ch] = (float) Math.sqrt((double) effBuf[ch] * effBuf[ch] + (double) s * s);
                 }

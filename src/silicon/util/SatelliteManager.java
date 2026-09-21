@@ -428,6 +428,77 @@ public class SatelliteManager {
         return Math.max(0f, stackEff(sum, max));
     }
 
+    // —— 覆盖显示用的「按编码分组取最强」缓冲（静态复用，避免每格分配）——
+    private static final Seq<String> satGroupCodes = new Seq<>();
+    private static final Seq<float[]> satGroupAcc = new Seq<>();
+    private static int satGroupCount = 0;
+
+    /**
+     * (wx,wy) 处有效强度最高的**单个编码**（仅供覆盖显示：格子上的数字必须等于某个编码真实可用的强度，
+     * 不能是跨编码求和）。
+     * <ul>
+     *   <li>逐编码分组：同编码用 sum/max 计 {@link #stackEff}，取各组最大值；</li>
+     *   <li>判定/绑定仍走 {@link #satelliteStrengthAt}（中继、控制台按自己绑定的编码）；</li>
+     *   <li>未绑定记录（code == null，读档名册丢失的兜底）作为独立一组参与，出参编码为 null，
+     *       绘制端据此走蓝色渐变；</li>
+     *   <li>上行门控与逐编码一致：编码无存活地面源时该组不计入。</li>
+     * </ul>
+     *
+     * @param codeOut 出参（可为 null）：最强组的编码（null = 未绑定组）；无覆盖时不被写入
+     * @return 最强组的对数叠加强度（无覆盖为 0）
+     */
+    public static float bestSatelliteAt(Team team, float wx, float wy, String[] codeOut) {
+        return bestSatelliteAt(team, wx, wy, codeOut, -1);
+    }
+
+    /**
+     * 同上，可限定信道（{@code channelFilter >= 1} 时只统计固化信道等于该值的卫星；-1 = 不限）。
+     * 频谱面板"无编码视图"（检测器）逐信道取最强编码时用它。
+     */
+    public static float bestSatelliteAt(Team team, float wx, float wy, String[] codeOut, int channelFilter) {
+        satGroupCodes.clear();
+        satGroupCount = 0;
+        for (SatelliteRecord r : satellites(team)) {
+            if (channelFilter >= 1 && r.channel != channelFilter) continue;
+            if (r.code != null && !silicon.world.blocks.signal.SignalChannel.hasLiveSource(team, r.code)) continue;
+            float e = satelliteEffAt(r, wx, wy);
+            if (e <= 0f) continue;
+            int idx = -1;
+            for (int i = 0; i < satGroupCount; i++) {
+                String c = satGroupCodes.get(i);
+                if (c == null ? r.code == null : c.equals(r.code)) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                idx = satGroupCount++;
+                if (idx < satGroupCodes.size) {
+                    satGroupCodes.set(idx, r.code);
+                } else {
+                    satGroupCodes.add(r.code);
+                }
+                while (satGroupAcc.size <= idx) satGroupAcc.add(new float[2]);
+                float[] fresh = satGroupAcc.get(idx);
+                fresh[0] = 0f;
+                fresh[1] = 0f;
+            }
+            float[] acc = satGroupAcc.get(idx);
+            acc[0] += e;
+            if (e > acc[1]) acc[1] = e;
+        }
+        float best = 0f;
+        for (int i = 0; i < satGroupCount; i++) {
+            float[] acc = satGroupAcc.get(i);
+            float v = Math.max(0f, stackEff(acc[0], acc[1]));
+            if (v > best) {
+                best = v;
+                if (codeOut != null) codeOut[0] = satGroupCodes.get(i);
+            }
+        }
+        return best;
+    }
+
     /** 某队伍待发射卫星数（客机读广播镜像，权威端读登记列表） */
     public static int readyCount(Team team) {
         if (!isAuthority()) return readyMirror.get(team, 0);
