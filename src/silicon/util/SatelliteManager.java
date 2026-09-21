@@ -9,7 +9,6 @@ import arc.math.Mathf;
 import arc.struct.ObjectIntMap;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
-import arc.util.Time;
 import mindustry.content.Fx;
 import mindustry.entities.Effect;
 import mindustry.game.Gamemode;
@@ -163,9 +162,9 @@ public class SatelliteManager {
                 if (r.orbit == SatelliteConsole.ORBIT_GEO) {
                     r.phase = Mathf.atan2(u.y - cy, u.x - cx) / Mathf.PI2;
                 } else if (r.orbit == SatelliteConsole.ORBIT_SSO) {
-                    r.phase = u.y / Vars.world.unitHeight() - Time.time / orbitPeriod(r.orbit);
+                    r.phase = u.y / Vars.world.unitHeight();
                 } else {
-                    r.phase = u.x / Vars.world.unitWidth() - Time.time / orbitPeriod(r.orbit);
+                    r.phase = u.x / Vars.world.unitWidth();
                 }
                 satRecords.get(u.team, Seq::new).add(r);
             }
@@ -297,10 +296,12 @@ public class SatelliteManager {
     /** 轨迹边缘内缩（px）：卫星扫过全部图幅但不越界 */
     public static final float SCAN_MARGIN = 8f;
 
-    /** 扫描进度 u：phase + Time.time/周期，1.0 = 沿主轴横穿全图一圈（回绕）；
-     *  位置/保存/发射初始化共用的唯一时间换算入口（读档 Time.time 归零后从存档 u 无缝续接） */
+    /** 扫描进度 u（1.0 = 沿主轴横穿全图一圈（回绕）；GEO 定点不使用本值）：
+     *  相位是**自累加**的存档字段（{@link OrbitSatelliteController} 每帧 += delta/周期），
+     *  所以位置是「存档值的纯函数」——与 Time.time 这类全局时钟无关，任何读档/重启都精确续接。
+     *  位置/保存/发射初始化共用的唯一入口。 */
     public static float scanU(SatelliteRecord r) {
-        return r.phase + Time.time / orbitPeriod(r.orbit);
+        return r.phase;
     }
 
     /** 指定轨道与进度 u 的星下点 X：LEO/MEO = 经度回绕（东西向匀速），SSO = 正弦摆动（极轨） */
@@ -339,9 +340,12 @@ public class SatelliteManager {
         return scanYAt(r.orbit, scanU(r));
     }
 
-    /** 保存用相位：GEO 存定点方位角（与时间无关），其余存当前扫描进度 u（读档从该进度续接，卫星不跳位） */
+    /** 保存用相位：GEO = 定点方位角，其余 = 当前扫描进度 u。两者都直接取 phase——
+     *  相位本身就是累加器，「存档值 = 当前位置」，读档不需要任何时间换算。
+     *  （旧档里存的是线性叠加了 Time.time 的旧语义 u，读入后会按新语义当作进度继续推进，
+     *  位置依旧连续，只是与旧档保存瞬间的位置不同——一次性差异，之后完全确定。） */
     public static float phaseForSave(SatelliteRecord r) {
-        return r.orbit == SatelliteConsole.ORBIT_GEO ? r.phase : scanU(r);
+        return r.phase;
     }
 
     // —— 卫星信号语义（覆盖/强度/干扰）——
@@ -580,11 +584,6 @@ public class SatelliteManager {
         rec.code = signalName;
         rec.channel = resolveChannel(team, signalName);
         rec.orbit = orbit;
-        UnitType ut = SatelliteUnits.typeFor(orbit);
-        Unit unit = ut.create(team);
-        unit.set(launcher.x, launcher.y);
-        unit.add();
-        rec.unitId = unit.id;
         // 初始相位：取星下点轨迹上距中枢最近的点作为出生点（与发射特效衔接）；
         // GEO 定点于中枢方位角（距图心 0.05 短半轴的定点环，多颗自然散开）
         float cx = Vars.world.unitWidth() / 2f, cy = Vars.world.unitHeight() / 2f;
@@ -600,8 +599,14 @@ public class SatelliteManager {
                     best = u;
                 }
             }
-            rec.phase = best - Time.time / orbitPeriod(orbit);
+            rec.phase = best;
         }
+        // 出生点直接落在轨道点上（相位此刻已确定）：否则出生那一帧卫星会停在发射中枢方块上
+        UnitType ut = SatelliteUnits.typeFor(orbit);
+        Unit unit = ut.create(team);
+        unit.set(scanX(rec), scanY(rec));
+        unit.add();
+        rec.unitId = unit.id;
         satRecords.get(team, Seq::new).add(rec);
         // 发射特效（在发射中枢位置，全图广播）：原版火箭发射喷发 + 原版发射舱升空 + 原版大范围
         // 冲击环（launchAccelerator 160px / launch 120px——launchPod 的细条纹会被光柱淹没，用大环保证

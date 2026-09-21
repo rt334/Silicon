@@ -13,6 +13,7 @@ import mindustry.Vars;
 import mindustry.gen.Unit;
 import mindustry.graphics.Layer;
 import mindustry.type.UnitType;
+import mindustry.world.meta.Env;
 import silicon.world.blocks.satellite.SatelliteConsole;
 import silicon.util.OrbitSatelliteController;
 
@@ -98,6 +99,16 @@ public class SatelliteUnits {
                 speed = 0f; // 位置由控制器直接覆写，不使用自身速度
                 crashDamageMultiplier = 0f; // 坠毁不砸地面
                 createWreck = false;
+
+                // —— 环境旗标：必须显式放行全部环境 ——
+                // UnitType 默认 envEnabled = Env.terrestrial / envDisabled = Env.scorching（UnitType.java:51-53），
+                // 于是卫星在焦土图（Erekir 全部地图：Planets.java:56）与太空图（Planets.java:182，envEnabled 不含
+                // Env.space）会被引擎「环境处死」——该路径不看 hittable/targetable/killable/useUnitCap
+                // （UnitComp.java:751-753 → Units.unitEnvDeath → dead + Call.unitDestroy），
+                // 表现为发射后一帧卫星消失、UnitDestroyEvent 连名册一起删（覆盖/信号全无）。
+                // 卫星是轨道实体，与地面环境无关：取 any/none（原版 assembly-drone 同写法，UnitTypes.java:4617-4618）。
+                envEnabled = Env.any;
+                envDisabled = Env.none;
 
                 // —— 索敌/伤害/物理全隔离（详见类注释）——
                 targetable = false;

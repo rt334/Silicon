@@ -379,6 +379,11 @@ public class Silicon extends Mod {
                 } catch (NumberFormatException ignored) {
                 }
             }));
+
+            // 暂停请求的确认回包（服务器 → 请求者）：不置 complete 的话，客户端会每 60 秒
+            // 重发一次 "pause"（见下方 Trigger.update 的重试分支），且 pauseMode=0 时服务器不回包。
+            // 注意：本回调在 PR #50 同步上游时被误删过，勿再删。
+            netClient.addPacketHandler("paused", s -> Vars.pause.complete = true);
         });
 
         Events.run(EventType.Trigger.update, () -> {
