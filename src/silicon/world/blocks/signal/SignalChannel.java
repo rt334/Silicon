@@ -73,25 +73,59 @@ public class SignalChannel {
     }
 
     /**
-     * 仅地面覆盖（信号源 + 激活中继器），卫星覆盖不参与。
-     * 供卫星发射的 1:1 配对计数（hubsInSignal/consolesInSignal）使用：卫星覆盖只解锁
-     * "远方指派"该编码，配对仍约束地面基建布局——否则全图覆盖会把所有中枢算进同一
+     * 仅地面覆盖（信号源 + 激活中继器），卫星覆盖不参与——**按 SINR 判定**：
+     * 该编码在 (wx,wy) 处的有效强度 > 0（功率压得过底噪 + 干扰）才算"在范围内"。
+     * 供卫星发射的 1:1 配对计数（hubsInSignal/consolesInSignal）与卫星控制台绑定使用：
+     * 卫星覆盖只解锁"远方指派"，配对仍约束地面基建布局——否则全图覆盖会把所有中枢算进同一
      * "范围"，多中枢队伍永远 MULTI_HUB，发射能力被自己的卫星锁死。
      */
     public static boolean inGroundSignalRange(Team team, String name, float wx, float wy) {
-        if (name == null || name.isEmpty()) return false;
+        return groundEffAt(team, name, wx, wy) > 0f;
+    }
+
+    /** 地面有效强度探测缓冲（与覆盖绘制的静态缓冲分开，避免互相覆盖） */
+    private static final float[] probeEff = new float[SignalJammer.CHANNEL_MAX + 1];
+    private static final Building[] probeSrc = new Building[SignalJammer.CHANNEL_MAX + 1];
+
+    /**
+     * 指定编码**地面层**（信号源 + 已激活且绑定同编码的中继器）在 (wx,wy) 处的有效强度（SINR 比值制）：
+     * 与 {@link #effectiveAll} 的按编码视图同一算法（信号 = 该编码最强的一路地面发射机，干扰 = 其余全部
+     * 身份功率和 + 邻信道泄漏 + 干扰器），取各信道最大者。
+     * <ul>
+     *   <li>编码无存活地面源 → 0（与卫星上行门控同源：源全灭则该编码的地面链路不成立）；</li>
+     *   <li>被禁用/断电的信号源功率为 0（{@link SignalSource.SignalSourceBuild#strengthAt}），
+     *       已激活的中继器本身也是发射机 → 级联自然成立，不需要几何距离特判；</li>
+     *   <li>中继器激活判定、卫星控制台绑定/配对、覆盖与频谱显示共用本方法或同一算法——
+     *       所以"看得见的强度"就是"能否转发的强度"。</li>
+     * </ul>
+     */
+    public static float groundEffAt(Team team, String code, float wx, float wy) {
+        if (code == null || code.isEmpty() || team == null) return 0f;
+        if (!hasLiveSource(team, code)) return 0f;
+        // 廉价前置：该编码是否有任何地面发射机覆盖到本点（只做距离衰减，不算干扰）。
+        // 没有 → 信号必为 0：远处空闲的中继器每 tick 调用时不必跑完整批算
+        boolean inRange = false;
         for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(team)) {
-            if (sb.signal != null && name.equals(sb.signal.name)
-                    && SignalSource.strengthAt(sb.x, sb.y, wx, wy) > 0f) {
-                return true;
+            if (sb.signal != null && code.equals(sb.signal.name) && sb.strengthAt(wx, wy) > 0f) {
+                inRange = true;
+                break;
             }
         }
-        for (SignalRelay.SignalRelayBuild rb : SignalRelay.allRelays(team)) {
-            if (rb.active && name.equals(rb.selectedSource) && rb.strengthAt(wx, wy) > 0f) {
-                return true;
+        if (!inRange) {
+            for (SignalRelay.SignalRelayBuild rb : SignalRelay.allRelays(team)) {
+                if (rb.active && code.equals(rb.selectedSource) && rb.strengthAt(wx, wy) > 0f) {
+                    inRange = true;
+                    break;
+                }
             }
         }
-        return false;
+        if (!inRange) return 0f;
+        effectiveAll(team, wx, wy, probeEff, probeSrc, null, null, code);
+        float best = 0f;
+        for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
+            if (probeEff[ch] > best) best = probeEff[ch];
+        }
+        return best;
     }
 
     // —— 卫星上行门控：卫星广播编码 X 的前提是本队存在存活的地面信号源 X ——

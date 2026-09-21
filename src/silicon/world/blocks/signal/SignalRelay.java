@@ -4,7 +4,6 @@ import arc.Core;
 import arc.graphics.g2d.Draw;
 import arc.graphics.g2d.Fill;
 import arc.graphics.g2d.Lines;
-import arc.math.Mathf;
 import arc.scene.ui.layout.Table;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
@@ -21,13 +20,21 @@ import mindustry.world.Block;
 import silicon.util.SignalOverlay;
 
 /**
- * 信号中继器：位于信号覆盖范围（信号源或已激活中继器的 15 格内）时自动激活，
- * 激活后自身同样提供半径 15 格的信号，可级联延长信号覆盖。
- * 信号强度与信号源一致（正态分布衰减，0~15），绑定放置队伍。
+ * 信号中继器：**每 tick 实时判定能否转发**——绑定编码的地面/卫星有效强度（SINR 折算后）>
+ * {@link #FORWARD_THRESHOLD} 时才转发。地面链路走 {@link SignalChannel#groundEffAt}（底噪 + 同信道
+ * 异编码 CCI + 邻信道泄漏 + 干扰器），因此干扰器/同信道异编码源可以把它压断；卫星链路走
+ * {@link silicon.util.SatelliteManager#satelliteStrengthAt}（含上行门控）。级联由"已激活的同编码
+ * 中继器本身也是发射机"自然产生（零衰减，仍受 SINR 约束）。转发时自身与信号源同模型广播（半径
+ * 15 格、正态衰减 0~15），绑定放置队伍。
+ * <p>注意：15 格是**原始**覆盖半径；SINR 阈值下实际可转发/可绑定的半径更小（净空单源约 12.5 格），
+ * 覆盖显示与频谱给出的数值才是判定依据。
  */
 public class SignalRelay extends Block {
     /** 中继器信号半径（格） */
     public static final float RADIUS = SignalSource.RADIUS;
+    /** 转发阈值：地面/卫星链路的有效强度（SINR 折算后）都必须大于该值才转发——
+     *  与覆盖显示、频谱"可用强度"同一口径，阈值以下=压不过底噪+干扰（或弱到无法解调） */
+    public static final float FORWARD_THRESHOLD = 0.5f;
 
     public SignalRelay(String name) {
         super(name);
@@ -45,7 +52,7 @@ public class SignalRelay extends Block {
         config(String.class, (SignalRelayBuild b, String value) ->
                 b.selectedSource = (value == null || value.isEmpty()) ? null : value);
         // active 状态同步（服务器在激活状态变化时下发；客机应用后 H 覆盖可显示级联段）。
-        // 客机伪造的 Boolean 会在下一次 updateActive（20 tick）被服务器重算覆盖，天然自愈。
+        // 客机伪造的 Boolean 会在下一 tick 的 updateActive 被本地重算覆盖，天然自愈。
         config(Boolean.class, (SignalRelayBuild b, Boolean v) -> {
             if (v != null) b.active = v;
         });
@@ -95,11 +102,12 @@ public class SignalRelay extends Block {
         public String selectedSource = null;
         /** 中继信道（兼容字段：未绑定时用；绑定后信道跟随所选信号源） */
         public int channel = 1;
+        /** 上一 tick 实测入站强度：地面（SINR 有效值）与卫星——面板/悬停信息实时显示，跨端本地计算 */
+        public float inGroundEff = 0f, inSatEff = 0f;
         /** 上次渲染的信号源列表签名（配置面板实时刷新用） */
         private String lastSrcSignature = "";
         /** 配置面板源按钮组（选中态实时同步用；面板关闭后无引用也无妨） */
         private arc.scene.ui.ButtonGroup<arc.scene.ui.TextButton> srcBtnGroup = null;
-        private int timer = 0;
 
         @Override
         public void onProximityAdded() {
@@ -115,11 +123,11 @@ public class SignalRelay extends Block {
 
         @Override
         public void updateTile() {
-            // 每 20 tick 检测一次激活状态（级联传播：逐级激活）
-            if (++timer >= 20) {
-                timer = 0;
-                updateActive();
-            }
+            // 实时检测能否转发：每 tick 按 SINR 有效强度重算——干扰器开关、信号源断电/禁用、
+            // 绑定变更、级联上下游变化都在同一 tick 生效。
+            // 远处空闲中继由 SignalChannel.groundEffAt 的廉价前置短路（只做距离衰减，不跑完整批算），
+            // 只有"确有本编码发射机覆盖本点"或"需要判断是否掉线"的中继才付全量代价。
+            updateActive();
         }
 
         /** 供电是否充足（power.status：0=无电，1=满电） */
@@ -149,35 +157,26 @@ public class SignalRelay extends Block {
             return channel;
         }
 
+        /**
+         * 实时重算"能否转发"，结果写入 {@link #active}（并记录入站强度供面板显示）。
+         * <p>地面链路：{@link SignalChannel#groundEffAt}（SINR：底噪 + 同信道异编码 CCI + 邻信道泄漏 +
+         * 干扰器）> {@link #FORWARD_THRESHOLD} 才转发——干扰器/异编码同信道源把有效强度压到阈值以下即断链，
+         * 与卫星链路同一阈值。级联由"已激活的同编码中继器本身也是发射机"自然产生，不再需要几何距离特判。
+         * <p>卫星链路：{@link silicon.util.SatelliteManager#satelliteStrengthAt} > 阈值（上行门控在内：
+         * 编码无存活地面源时卫星静默）。
+         */
         void updateActive() {
             boolean newActive = false;
-            // 被禁用（如开关控制）或断电时不激活
-            if (enabled && hasPower()) {
-                // 必须绑定信号源，且该源存在并供电
-                SignalSource.SignalSourceBuild src = findSource();
-                if (src != null && src.power != null && src.power.status > 0.001f) {
-                    // 在所选信号源覆盖范围内（或其同源级联转发范围内）才能发射
-                    if (Mathf.dst(x, y, src.x, src.y) <= RADIUS * 8f) {
-                        newActive = true;
-                    } else {
-                        // 级联：其他绑定同一信号源且已激活的中继器
-                        for (SignalRelayBuild rb : SignalRelay.allRelays(team)) {
-                            if (rb == this || !rb.active) continue;
-                            if (selectedSource != null && selectedSource.equals(rb.selectedSource)
-                                    && Mathf.dst(x, y, rb.x, rb.y) <= RADIUS * 8f) {
-                                newActive = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                // 卫星中继：所选编码存在在轨卫星，且卫星信号在中继器位置有效
-                // （星下点覆盖圆内、未被其固化信道干扰压制；总和扣底噪后需 >0.5——
-                // 首颗卫星有效强度 1.0 达标，覆盖圆内中继器即可被激活转发，叠星提升抗干扰裕度）。
-                // 上行门控在 satelliteStrengthAt 内部：编码无存活地面源（如源被拆）时返回 0 → 中继器去活
-                if (!newActive) {
-                    float satEff = silicon.util.SatelliteManager.satelliteStrengthAt(team, selectedSource, x, y);
-                    if (satEff > 0.5f) newActive = true;
+            inGroundEff = 0f;
+            inSatEff = 0f;
+            // 被禁用（如开关控制）或断电时不激活；未绑定编码不转发
+            if (enabled && hasPower() && selectedSource != null && !selectedSource.isEmpty()) {
+                inGroundEff = SignalChannel.groundEffAt(team, selectedSource, x, y);
+                if (inGroundEff > FORWARD_THRESHOLD) {
+                    newActive = true;
+                } else {
+                    inSatEff = silicon.util.SatelliteManager.satelliteStrengthAt(team, selectedSource, x, y);
+                    if (inSatEff > FORWARD_THRESHOLD) newActive = true;
                 }
             }
             if (newActive != active) {
@@ -187,6 +186,25 @@ public class SignalRelay extends Block {
                 // 按队定向,敌队客户端不再收到我方中继器激活时机）
                 if (Vars.net.server()) silicon.util.NetSync.sendTeamConfig(this, active);
             }
+        }
+
+        /** 未转发的原因键（面板/悬停实时状态行用；null = 正在转发） */
+        String forwardStatusKey() {
+            if (active) return null;
+            if (!enabled) return "block.silicon-signal-relay.status.off";
+            if (!hasPower()) return "block.silicon-signal-relay.status.noPower";
+            if (selectedSource == null || selectedSource.isEmpty()) return "block.silicon-signal-relay.nobind";
+            return "block.silicon-signal-relay.status.weak";
+        }
+
+        /** 实时转发状态文本（配置面板与悬停信息共用；数据来自上一 tick 的实测入站强度） */
+        String statusText() {
+            String key = forwardStatusKey();
+            String state = key == null ? Core.bundle.get("block.silicon-signal-relay.active")
+                    : "[lightgray]" + Core.bundle.get(key) + "[]";
+            return Core.bundle.format("block.silicon-signal-relay.status.line", state,
+                    arc.util.Strings.fixed(inGroundEff, 1), arc.util.Strings.fixed(inSatEff, 1),
+                    arc.util.Strings.fixed(FORWARD_THRESHOLD, 1));
         }
 
         /** 模糊匹配：query 的字符按顺序出现在 code 中（子序列匹配，忽略大小写）；空 query 匹配一切 */
@@ -248,6 +266,10 @@ public class SignalRelay extends Block {
                         selectedSource == null || selectedSource.isEmpty() ? Core.bundle.get("block.silicon-signal-relay.nobind") : selectedSource))
                         .colspan(SignalJammer.CHANNEL_MAX).center().pad(2f);
                 t.row();
+                // 实时转发状态行：每帧读取上一 tick 实测的入站强度（地面 SINR 有效值 / 卫星），
+                // 未转发时给出原因（关闭/无电/未绑定/信号不足）——"干扰能不能压断这条链路"的直接显示
+                t.label(() -> statusText()).colspan(SignalJammer.CHANNEL_MAX).center().pad(2f);
+                t.row();
                 // 标题居中，原版黄色（跨满整行，避免挤占首列导致按钮间距不均）
                 t.add(Core.bundle.get("block.silicon-signal-relay.source")).colspan(SignalJammer.CHANNEL_MAX).center()
                         .color(mindustry.graphics.Pal.accent).pad(2f);
@@ -308,13 +330,15 @@ public class SignalRelay extends Block {
             Draw.reset();
         }
 
-        /** 选中显示：仅保留原版 bar（生命/电力）+ 信号唯一编号（绑定源编号） */
+        /** 选中显示：仅保留原版 bar（生命/电力）+ 信号唯一编号（绑定源编号）+ 实时转发状态 */
         @Override
         public void display(Table table) {
             super.display(table);
             table.row();
             table.label(() -> Core.bundle.format("block.silicon-signal-relay.source.current",
                     selectedSource == null || selectedSource.isEmpty() ? Core.bundle.get("block.silicon-signal-relay.nobind") : selectedSource)).pad(2f);
+            table.row();
+            table.label(() -> statusText()).pad(2f);
         }
 
         /** 存档版本：2 = bool(active) + i(channel) + str(selectedSource)；覆写 version() 使读档时绑定/信道不丢失 */
