@@ -81,7 +81,7 @@ public class SatelliteManager {
     /** 状态广播字段分隔符（编码：teamId|sigC|testC|名册|readyC|readyType|producingType；
      *  名册条目 "unitId:code:channel:orbit:phaseBits"，条目间 ';'，空名册为空字段） */
     static final String SEP = "|";
-    /** 每星信号强度（覆盖圆内、未被压制时的原始强度；多星对数叠加后扣底噪）——轨道越高覆盖越大、强度越低：
+    /** 每星信号强度（覆盖圆内、未被压制时的原始强度；多星按非相干功率合成 √(Σeᵢ²) 叠加）——轨道越高覆盖越大、强度越低：
      *  LEO 1.5 / MEO 1.3 / GEO 1.1（首颗扣底噪后 1.0/0.8/0.6，均足以激活中继器转发），SSO 特例 1.5（小覆盖强信号） */
     public static float satelliteStrength(int orbit) {
         switch (orbit) {
@@ -395,21 +395,33 @@ public class SatelliteManager {
         return satelliteStrength(r.orbit);
     }
 
-    /** 对数叠加：最强一星全额计入，其余星合并贡献 ln(1+Σ其余)——叠星仍有收益但边际递减；
-     *  单星时 rest=0 → ln(1)=0，语义与线性时代完全一致（首星激活阈值不变） */
-    public static float stackEff(float sumEff, float maxEff) {
-        float rest = sumEff - maxEff;
-        if (rest <= 0f) return maxEff;
-        return maxEff + (float)Math.log(1.0 + rest);
+    /**
+     * 多星叠加（非相干功率合成）：{@code total = √(Σ eᵢ²)}。
+     * <p>选它的三个理由：
+     * <ol>
+     *   <li><b>与层间合成同一运算</b>——"卫星 × 地面"本来就是 {@code √(g² + s²)}，叠星用同一函数后
+     *       整个模型可结合：把 N 颗卫星与地面源一起丢进同一个 √(Σ·²) 与"先叠星再叠地面"结果完全相同；</li>
+     *   <li><b>物理正确</b>：多颗卫星是彼此独立的非相干发射源，功率（幅值平方）相加、幅值按平方根合成，
+     *       不像线性叠加那样把 N 颗当成一个 N 倍功率的发射机，也不像对数叠加那样在强项上再做非线性压缩；</li>
+     *   <li><b>尺度自洽</b>：N 颗同强度卫星 = {@code e·√N}（数量翻 4 倍强度才翻倍），单星语义完全不变
+     *       （首星激活阈值不变），抗干扰裕度随 √N 单调增长且永不"白送"。</li>
+     * </ol>
+     * 对比同样 10 颗 LEO（单星有效 1.2）：RSS = 3.79；旧对数叠星 = 3.67（形状相近但小 N 时偏高）；
+     * 线性叠加 = 12.0（明显失真）。
+     *
+     * @param sumSquares Σ eᵢ²（各星有效强度的平方和）
+     */
+    public static float stackEff(float sumSquares) {
+        return (float) Math.sqrt(Math.max(0f, sumSquares));
     }
 
     /**
      * 指定编码的卫星信号在 (wx,wy) 处的有效强度（SINR 比值制）：覆盖该点且编码匹配的卫星
-     * 各自按信噪比折算有效强度（{@link #satelliteEffAt}），再对数叠加（最强一星全额，其余合并
-     * 贡献 ln(1+Σ其余)）——底噪已在每星质量因子内，不再末尾扣减。
+     * 各自按信噪比折算有效强度（{@link #satelliteEffAt}），再按非相干功率合成
+     * {@link #stackEff  √(Σ eᵢ²)}——底噪已在每星质量因子内，不再末尾扣减。
      * 干扰压制语义：该编码功率 ≤ 底噪+同信道干扰（SINR ≤ 1）即无信号；随 SINR 升至 3.5 达满质量。
      * 净空单星有效强度：LEO 1.2 / MEO 0.83 / GEO 0.53，均超过中继器激活阈值（>0.5），
-     * 单星即可让覆盖圆内的中继器转发；叠星按对数提升抗干扰裕度（边际递减）。
+     * 单星即可让覆盖圆内的中继器转发；叠星按 √N 提升抗干扰裕度。
      * code 必须 non-null（中继器按编码判定；全量聚合在绘制层内联，共用 {@link #stackEff}）。
      */
     public static float satelliteStrengthAt(Team team, String code, float wx, float wy) {
@@ -417,15 +429,14 @@ public class SatelliteManager {
         // 上行门控：该编码的存活地面源全部消失 → 卫星停止广播（删源即断链：绑定该编码的
         // 中继器随之去活，覆盖绘制同步消失；重放同编码源自动恢复）。名册与编码固化不动。
         if (!silicon.world.blocks.signal.SignalChannel.hasLiveSource(team, code)) return 0f;
-        float sum = 0f, max = 0f;
+        float sumSq = 0f;
         for (SatelliteRecord r : satellites(team)) {
             if (r.code == null || !code.equals(r.code)) continue;
             float e = satelliteEffAt(r, wx, wy);
             if (e <= 0f) continue;
-            sum += e;
-            if (e > max) max = e;
+            sumSq += e * e;
         }
-        return Math.max(0f, stackEff(sum, max));
+        return stackEff(sumSq);
     }
 
     // —— 覆盖显示用的「按编码分组取最强」缓冲（静态复用，避免每格分配）——
@@ -437,7 +448,7 @@ public class SatelliteManager {
      * (wx,wy) 处有效强度最高的**单个编码**（仅供覆盖显示：格子上的数字必须等于某个编码真实可用的强度，
      * 不能是跨编码求和）。
      * <ul>
-     *   <li>逐编码分组：同编码用 sum/max 计 {@link #stackEff}，取各组最大值；</li>
+     *   <li>逐编码分组：同编码按非相干功率合成 {@link #stackEff √(Σeᵢ²)}，取各组最大值；</li>
      *   <li>判定/绑定仍走 {@link #satelliteStrengthAt}（中继、控制台按自己绑定的编码）；</li>
      *   <li>未绑定记录（code == null，读档名册丢失的兜底）作为独立一组参与，出参编码为 null，
      *       绘制端据此走蓝色渐变；</li>
@@ -445,7 +456,7 @@ public class SatelliteManager {
      * </ul>
      *
      * @param codeOut 出参（可为 null）：最强组的编码（null = 未绑定组）；无覆盖时不被写入
-     * @return 最强组的对数叠加强度（无覆盖为 0）
+     * @return 最强组的叠加强度（无覆盖为 0）
      */
     public static float bestSatelliteAt(Team team, float wx, float wy, String[] codeOut) {
         return bestSatelliteAt(team, wx, wy, codeOut, -1);
@@ -478,19 +489,15 @@ public class SatelliteManager {
                 } else {
                     satGroupCodes.add(r.code);
                 }
-                while (satGroupAcc.size <= idx) satGroupAcc.add(new float[2]);
-                float[] fresh = satGroupAcc.get(idx);
-                fresh[0] = 0f;
-                fresh[1] = 0f;
+                while (satGroupAcc.size <= idx) satGroupAcc.add(new float[1]);
+                satGroupAcc.get(idx)[0] = 0f;
             }
             float[] acc = satGroupAcc.get(idx);
-            acc[0] += e;
-            if (e > acc[1]) acc[1] = e;
+            acc[0] += e * e; // 非相干功率合成：累加平方
         }
         float best = 0f;
         for (int i = 0; i < satGroupCount; i++) {
-            float[] acc = satGroupAcc.get(i);
-            float v = Math.max(0f, stackEff(acc[0], acc[1]));
+            float v = stackEff(satGroupAcc.get(i)[0]);
             if (v > best) {
                 best = v;
                 if (codeOut != null) codeOut[0] = satGroupCodes.get(i);

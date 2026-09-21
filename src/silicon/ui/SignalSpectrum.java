@@ -22,8 +22,8 @@ import silicon.world.blocks.signal.SignalSource;
  * 本点干扰功率 I（SINR 分母去掉底噪） | 该点可用有效强度条（SINR 折算后，含卫星层 RSS 合成）。
  * <p>
  * <b>卫星层</b>：绑定信道的在轨卫星（channel ≥ 1）按信道各自 SINR 折算（satelliteEffAt，底噪在
- * 质量因子内）后对数叠加（stackEff），再与地面强度 RSS 功率合成 total = √(g² + s²)——与 H 覆盖
- * 层模型一致；未绑定卫星（channel < 1）不进信道视图（仅覆盖显示，见覆盖层）。
+ * 质量因子内）后按非相干功率合成（√(Σeᵢ²)），再与地面强度 RSS 功率合成——与 H 覆盖层模型一致
+ * （两次合成是同一个 √(Σ·²) 运算，可结合）；未绑定卫星（channel < 1）不进信道视图（仅覆盖显示）。
  * <p>
  * <b>布局防重叠（实测踩坑）</b>：BlockConfigFragment 在面板打开时按空标签 pack 一次定宽，节流刷新
  * 填入文本后外层不会重新加宽——列宽必须固定且按最宽文本预留，标签一律左对齐（居中文本溢出会向
@@ -58,9 +58,8 @@ public class SignalSpectrum {
     private static final String[] codeBuf = new String[SignalJammer.CHANNEL_MAX + 1];
     /** 无编码视图下逐信道取最强卫星编码的出参复用 */
     private static final String[] satCodeTmp = new String[1];
-    /** 卫星层按信道聚合缓冲（sum/max 计 stackEff，cnt 计占用） */
-    private static final float[] satSum = new float[SignalJammer.CHANNEL_MAX + 1];
-    private static final float[] satMax = new float[SignalJammer.CHANNEL_MAX + 1];
+    /** 卫星层按信道的非相干功率累加缓冲（Σeᵢ²，出值再开方），cnt 计占用 */
+    private static final float[] satSumSq = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final int[] satCnt = new int[SignalJammer.CHANNEL_MAX + 1];
     private static final LabelRef[] occLabels = new LabelRef[SignalJammer.CHANNEL_MAX + 1];
     private static final LabelRef[] itfLabels = new LabelRef[SignalJammer.CHANNEL_MAX + 1];
@@ -164,12 +163,11 @@ public class SignalSpectrum {
             String scope = silicon.util.SignalOverlay.codeOf(at);
             SignalChannel.effectiveAll(at.team, at.x, at.y, effBuf, srcBuf, intBuf, codeBuf, scope);
             // 卫星层：
-            //  - 有编码视图：只叠该编码的卫星（同编码 sum/max → stackEff），再与同编码地面 RSS 合成；
+            //  - 有编码视图：只叠该编码的卫星（非相干功率合成 √(Σeᵢ²)），再与同编码地面 RSS 合成；
             //  - 无编码视图（检测器）：逐信道跟随该信道地面最强编码；该信道无地面信号时取该信道最强卫星编码。
             //    两种情形都只涉及单一编码，不做跨编码求和（跨编码求和会算出任何中继都拿不到的强度）。
             for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
-                satSum[ch] = 0f;
-                satMax[ch] = 0f;
+                satSumSq[ch] = 0f;
                 satCnt[ch] = 0;
             }
             for (SatelliteManager.SatelliteRecord r : SatelliteManager.satellites(at.team)) {
@@ -181,8 +179,7 @@ public class SignalSpectrum {
                 if (e <= 0f) continue;
                 satCnt[rc]++; // 占用列：全部编码（信道拥挤度）
                 if (scope != null && !scope.equals(r.code)) continue; // 强度列：仅当前编码
-                satSum[rc] += e;
-                if (e > satMax[rc]) satMax[rc] = e;
+                satSumSq[rc] += e * e;
             }
             int cur = currentChannel.get();
             scopeRef.label.setText(scope == null
@@ -209,7 +206,7 @@ public class SignalSpectrum {
                 //  无编码视图 → 跟随该信道地面最强编码；该信道无地面信号时取该信道最强卫星编码。
                 float s;
                 if (scope != null) {
-                    s = Math.max(0f, SatelliteManager.stackEff(satSum[ch], satMax[ch]));
+                    s = SatelliteManager.stackEff(satSumSq[ch]);
                 } else if (codeBuf[ch] != null) {
                     s = SatelliteManager.satelliteStrengthAt(at.team, codeBuf[ch], at.x, at.y);
                 } else {

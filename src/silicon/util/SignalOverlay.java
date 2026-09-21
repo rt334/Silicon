@@ -424,10 +424,10 @@ public class SignalOverlay {
         }
     }
 
-    /** 范围模式（逐格合成）：每格取各信道最大有效信号，与卫星层（对数叠加扣底噪）取 max，用最强来源的
-     *  专属颜色绘制（重叠/干扰区显示最强或空白）。卫星信号与地面信号源共用同一透明度公式
-     *  (0.45+0.35t)·rangeAlpha·alpha 与同一强度标度（t = 强度/MAX_STRENGTH），每格只绘制一次——
-     *  卫星覆盖透明度与信号源完全一致 */
+    /** 范围模式（逐格合成）：每格按"当前查看的编码"聚合地面与卫星（卫星层为非相干功率合成 √(Σeᵢ²)，
+     *  与地面 RSS 合成 total = √(g² + s²)），用最强来源的专属颜色绘制（重叠/干扰区显示最强或空白）。
+     *  卫星信号与地面信号源共用同一透明度公式 (0.45+0.35t)·rangeAlpha·alpha 与同一强度标度
+     *  （t = 强度/MAX_STRENGTH），每格只绘制一次——卫星覆盖透明度与信号源完全一致 */
     static void drawRangeComposite(Team team, float alpha, String viewCode) {
         Rect view = Core.camera.bounds(Tmp.r1);
         float rpx = SignalSource.RADIUS * 8f;
