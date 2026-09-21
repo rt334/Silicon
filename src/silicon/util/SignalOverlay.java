@@ -11,6 +11,7 @@ import arc.scene.ui.Label;
 import arc.struct.ObjectIntMap;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
+import arc.util.Align;
 import arc.util.Tmp;
 import mindustry.Vars;
 import mindustry.game.EventType;
@@ -342,47 +343,26 @@ public class SignalOverlay {
         return null;
     }
 
-    /** 每格最大有效信号（一次遍历所有信道，与卫星层 RSS 功率合成）；返回有效强度、最强来源与最强卫星编码。
-     *  <p><b>按编码聚合</b>：viewCode 非 null 时，地面与卫星都只算该编码（格子上的数字 = 该编码真正可用的强度，
-     *  与中继激活/控制台绑定同一口径）；viewCode 为 null 时取该格最强的那一个编码——先看地面最强身份，
-     *  没有地面信号才退到最强卫星编码，绝不跨编码求和。</p> */
+    /** 每格最大有效信号（**与频谱面板同一实现**：SignalChannel.usableAll，逐信道地面 SINR ⊕ 同编码卫星 RSS）。
+     *  返回该格最强信道的可用度、贡献来源建筑与归属编码——因此 H 上的数字必然等于频谱里最高的那一行。
+     *  <p>viewCode 非 null 时只算该编码（悬停/配置面板打开的建筑）；为 null 时自动：逐信道取该信道地面最强编码，
+     *  该信道没有地面信号才取该信道最强卫星编码，绝不跨编码求和。</p> */
     static float bestSignal(Team team, float wx, float wy, Building[] bestSrcOut, String[] bestCodeOut, String viewCode) {
-        // 批量计算所有信道（一次遍历全部源，按信道分摊——比逐信道调用快约 5 倍）
-        SignalChannel.effectiveAll(team, wx, wy, effBuf, srcBuf, null, codeBuf, viewCode);
-        float bestStr = 0f;
+        SignalChannel.usableAll(team, wx, wy, effBuf, srcBuf, null, codeBuf, viewCode);
+        float best = 0f;
         Building bestSrc = null;
-        String groundCode = null;
+        String bestCode = null;
         for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
-            if (effBuf[ch] > bestStr) {
-                bestStr = effBuf[ch];
+            if (effBuf[ch] > best) {
+                best = effBuf[ch];
                 bestSrc = srcBuf[ch];
-                groundCode = codeBuf[ch];
+                bestCode = codeBuf[ch];
             }
         }
-        float groundStr = bestStr; // 地面层合成前强度（RSS 合成保留双方功率，着色归属按贡献较大方）
-        // 卫星层：只叠「当前查看的编码」；自动模式下跟随地面最强编码，无地面信号时取最强卫星编码
-        // （含未绑定记录：作为独立一组参与，编码出参为 null → 绘制端走蓝色渐变）
-        String satCode = viewCode != null ? viewCode : groundCode;
-        float satStr;
-        if (satCode != null) {
-            satStr = SatelliteManager.satelliteStrengthAt(team, satCode, wx, wy);
-        } else {
-            bestCodeTmp[0] = null;
-            satStr = SatelliteManager.bestSatelliteAt(team, wx, wy, bestCodeTmp);
-            satCode = bestCodeTmp[0];
-        }
-        // 卫星×地面 RSS 功率合成：total = √(g² + s²)——同编码功率相加，卫星对已有地面覆盖的
-        // 区域仍是真实增益（抗干扰裕度实质提升），不再是"地面弱时的替补"。
-        // 着色归属保持贡献较大的一方：地面=建筑专属色，卫星=编码色（未绑定蓝渐变）
-        bestStr = (float) Math.sqrt((double) groundStr * groundStr + (double) satStr * satStr);
-        if (satStr > groundStr) {
-            bestSrc = null; // 卫星层贡献占优
-            bestCodeOut[0] = satCode; // 最强贡献卫星的编码（未绑定记录为 null → 蓝渐变）
-        } else {
-            bestCodeOut[0] = null; // 地面层占优（或全零）：编码出参清空
-        }
         bestSrcOut[0] = bestSrc;
-        return bestStr;
+        // 卫星层主导（或无地面信号）时用编码色；编码为 null（未绑定卫星）时绘制端走蓝色渐变
+        bestCodeOut[0] = bestSrc == null ? bestCode : null;
+        return best;
     }
 
     /** 数字模式：可见区域内逐格取各信道最大有效信号，每格只绘制一次（字号覆盖一格 8px）；颜色取最强来源的专属色 */
@@ -403,10 +383,10 @@ public class SignalOverlay {
         String[] bestCode = bestCodeTmp;
         try {
             // 格子中心：tile 索引 gx 覆盖世界坐标 [gx*8, gx*8+8)，中心即 +4 —— 采样与绘字都用它。
-            // 横向按字体度量居中（步进 × 位数，1/2 位数都居中）；纵向沿用原基准字号的 -1.6 偏移（k 为字号倍率）
+            // 横向用 arc 的 Align.center（与绘制同一套布局代码，1/2 位数都精确居中，不依赖度量猜测）；
+            // 纵向沿用原基准字号调好的 -1.6 偏移（按字号倍率 k 缩放）
             float cell = 8f, half = cell / 2f;
             float k = scale / 0.2f;
-            float adv = Fonts.def.getData().getGlyph('0').xadvance;
             for (int gx = x0; gx <= x1; gx++) {
                 for (int gy = y0; gy <= y1; gy++) {
                     float wx = gx * cell + half, wy = gy * cell + half; // 格子中心（像素）
@@ -424,7 +404,7 @@ public class SignalOverlay {
                     // 复用预计算字符串避免分配
                     String num = NUMBER_STRINGS[Mathf.clamp(val, 0, SignalSource.MAX_STRENGTH)];
                     Fonts.def.setColor(Tmp.c1);
-                    Fonts.def.draw(num, wx - adv * num.length() * 0.5f, wy - 1.6f * k);
+                    Fonts.def.draw(num, wx, wy - 1.6f * k, Align.center);
                 }
             }
         } finally {

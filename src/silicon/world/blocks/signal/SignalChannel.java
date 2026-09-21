@@ -277,6 +277,67 @@ public class SignalChannel {
     }
 
     /**
+     * 单点 5 信道的**最终可用度**（显示端唯一实现）：地面 SINR 有效强度 ⊕ 卫星层非相干功率合成。
+     * H 覆盖、频谱面板（信号源/中继器/检测器）都调用它，所以 H 上显示的数字**必然**等于频谱里最高的那一行，
+     * 不会出现"覆盖说 8、检测器说 12"这种两处各写一套算法导致的分叉。
+     *
+     * <p>卫星层口径（与判定端一致，细节见 {@code SatelliteManager}）：
+     * <ul>
+     *   <li>{@code scopeCode} 非 null（源/中继/控制台面板、鼠标悬停查看某个编码）→ 只叠该编码的卫星；</li>
+     *   <li>{@code scopeCode} 为 null（检测器/自动）→ 逐信道跟随该信道地面最强编码；该信道没有地面信号时
+     *       取该信道最强卫星编码（仍是单一编码；未绑定卫星给出 null 编码 → 调用方走蓝色渐变）。</li>
+     * </ul>
+     * 每格只算一个编码，跨编码求和会算出任何中继都拿不到的数值。
+     *
+     * @param effOut  出参：每信道最终可用度（含卫星合成）
+     * @param srcOut  出参：每信道贡献来源建筑；卫星层主导（或该信道只有卫星）时为 null
+     * @param codeOut 出参（**必须非 null**）：每信道最终归属编码（卫星主导时可为卫星编码；无信号为 null）
+     * @param intOut  出参（可 null）：每信道 SINR 分母 I（地面部分，频谱"干扰"列用）
+     */
+    public static void usableAll(Team team, float wx, float wy, float[] effOut, Building[] srcOut,
+                                 float[] intOut, String[] codeOut, String scopeCode) {
+        effectiveAll(team, wx, wy, effOut, srcOut, intOut, codeOut, scopeCode);
+        for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) usableSatSq[ch] = 0f;
+        if (scopeCode != null) {
+            for (silicon.util.SatelliteManager.SatelliteRecord r : silicon.util.SatelliteManager.satellites(team)) {
+                if (!scopeCode.equals(r.code)) continue;
+                int rc = r.channel;
+                if (rc < 1 || rc > SignalJammer.CHANNEL_MAX) continue;
+                float e = silicon.util.SatelliteManager.satelliteEffAt(r, wx, wy);
+                if (e > 0f) usableSatSq[rc] += e * e;
+            }
+        } else {
+            // 自动：只累加"与本信道地面最强编码同名"的卫星（该信道没有地面信号的情况在下面单独取最强卫星编码）
+            for (silicon.util.SatelliteManager.SatelliteRecord r : silicon.util.SatelliteManager.satellites(team)) {
+                int rc = r.channel;
+                if (rc < 1 || rc > SignalJammer.CHANNEL_MAX) continue;
+                if (r.code == null || codeOut[rc] == null || !codeOut[rc].equals(r.code)) continue;
+                if (!hasLiveSource(team, r.code)) continue; // 上行门控
+                float e = silicon.util.SatelliteManager.satelliteEffAt(r, wx, wy);
+                if (e > 0f) usableSatSq[rc] += e * e;
+            }
+        }
+        for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
+            float s;
+            if (scopeCode != null || codeOut[ch] != null) {
+                s = silicon.util.SatelliteManager.stackEff(usableSatSq[ch]);
+            } else {
+                usableSatCode[0] = null;
+                s = silicon.util.SatelliteManager.bestSatelliteAt(team, wx, wy, usableSatCode, ch);
+                if (s > 0f) codeOut[ch] = usableSatCode[0]; // 只有卫星：归属该信道最强卫星编码（未绑定 = null）
+            }
+            if (s <= 0f) continue;
+            float g = effOut[ch];
+            effOut[ch] = (float) Math.sqrt((double) g * g + (double) s * s);
+            if (s > g) srcOut[ch] = null; // 卫星层主导：不画建筑专属色，调用方按 codeOut 上色
+        }
+    }
+
+    /** {@link #usableAll} 的卫星层累加缓冲（单线程渲染/游戏线程内串行使用） */
+    private static final float[] usableSatSq = new float[SignalJammer.CHANNEL_MAX + 1];
+    private static final String[] usableSatCode = new String[1];
+
+    /**
      * 全参数版：支持"按编码计算"。
      *
      * @param codeOut  出参（可 null）：每信道结果所属的编码——viewCode 为 null 时是该信道最强身份的编码
