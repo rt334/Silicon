@@ -70,8 +70,14 @@ public class SignalOverlay {
     private static final ObjectIntMap<Float> hueCount = new ObjectIntMap<>();
     /** 缩放阈值（相机视野宽度，像素）：视野宽于该值（缩小视角）显示蓝色范围，否则显示数字 */
     public static final float ZOOM_THRESHOLD_WIDTH = 600f;
-    /** 预计算的强度数字字符串（0~15），避免每帧分配 */
-    private static final String[] NUMBER_STRINGS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"};
+    /** 预计算的强度数字字符串（0~MAX_STRENGTH），避免每帧分配 */
+    private static final String[] NUMBER_STRINGS = new String[SignalSource.MAX_STRENGTH + 1];
+
+    static {
+        for (int i = 0; i < NUMBER_STRINGS.length; i++) {
+            NUMBER_STRINGS[i] = String.valueOf(i);
+        }
+    }
 
     /** 信号专属颜色：色相动态分配——新编码选择与所有已用颜色色相距离最大、且与所在区块背景色相差异大的色相
      *  （避开背景相近色，优先补色方向；bgHue=-1 表示背景无彩/未知，不限制）。
@@ -412,9 +418,10 @@ public class SignalOverlay {
                         satelliteColor(bestCode[0], t, Tmp.c1);
                     }
                     Tmp.c1.a((0.6f + 0.4f * t) * digitAlpha * alpha);
-                    // 复用预计算字符串避免分配；居中偏移随字号缩放
+                    // 复用预计算字符串避免分配；居中偏移随字号缩放，并按位数补偿（0~99 有两位数字）
+                    String num = NUMBER_STRINGS[Mathf.clamp(val, 0, SignalSource.MAX_STRENGTH)];
                     Fonts.def.setColor(Tmp.c1);
-                    Fonts.def.draw(NUMBER_STRINGS[val < 0 ? 0 : (val > 15 ? 15 : val)], wx - 1f * k, wy - 1.6f * k);
+                    Fonts.def.draw(num, wx - (1f + (num.length() - 1) * 1.2f) * k, wy - 1.6f * k);
                 }
             }
         } finally {

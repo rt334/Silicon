@@ -70,7 +70,7 @@ public class SignalJammer extends Block {
         return jammerList;
     }
 
-    /** 位置 (wx,wy) 处、指定信道受到的干扰总和（0~15 量级；同信道 + 邻信道泄漏，多台干扰器叠加；
+    /** 位置 (wx,wy) 处、指定信道受到的干扰总和（0~99 量级；同信道 + 邻信道泄漏，多台干扰器叠加；
      *  关闭的干扰器不干扰；不分队伍——敌方干扰器同样压制我方该信道信号）。
      *  实现委托 {@link SignalChannel#jammerAt}：与地面层（effectiveAll）**同一算法**，
      *  避免卫星层取最强、地面层求和的旧口径分叉。 */

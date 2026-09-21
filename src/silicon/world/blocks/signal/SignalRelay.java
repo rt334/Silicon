@@ -25,7 +25,7 @@ import silicon.util.SignalOverlay;
  * 异编码 CCI + 邻信道泄漏 + 干扰器），因此干扰器/同信道异编码源可以把它压断；卫星链路走
  * {@link silicon.util.SatelliteManager#satelliteStrengthAt}（含上行门控）。级联由"已激活的同编码
  * 中继器本身也是发射机"自然产生（零衰减，仍受 SINR 约束）。转发时自身与信号源同模型广播（半径
- * 15 格、正态衰减 0~15），绑定放置队伍。
+ * 15 格、对数衰减 0~99），绑定放置队伍。
  * <p>注意：15 格是**原始**覆盖半径；SINR 阈值下实际可转发/可绑定的半径更小（净空单源约 12.5 格），
  * 覆盖显示与频谱给出的数值才是判定依据。
  */
@@ -33,8 +33,9 @@ public class SignalRelay extends Block {
     /** 中继器信号半径（格） */
     public static final float RADIUS = SignalSource.RADIUS;
     /** 转发阈值：地面/卫星链路的有效强度（SINR 折算后）都必须大于该值才转发——
-     *  与覆盖显示、频谱"可用强度"同一口径，阈值以下=压不过底噪+干扰（或弱到无法解调） */
-    public static final float FORWARD_THRESHOLD = 0.5f;
+     *  与覆盖显示、频谱"可用度"同一口径，阈值以下=压不过底噪+干扰（或弱到无法解调）。
+     *  取值 = 标度上限 / 30（原 15 标度下的 0.5），保持相对语义不变 */
+    public static final float FORWARD_THRESHOLD = 3.3f;
 
     public SignalRelay(String name) {
         super(name);
@@ -314,7 +315,7 @@ public class SignalRelay extends Block {
             }).pad(4f);
         }
 
-        /** 本中继器在指定世界坐标处的原始信号强度（0~15，激活时；干扰由 SignalChannel 统一计算） */
+        /** 本中继器在指定世界坐标处的原始信号强度（0~99，激活时；干扰由 SignalChannel 统一计算） */
         public float strengthAt(float wx, float wy) {
             if (!active) return 0f;
             return SignalSource.strengthAt(x, y, wx, wy);

@@ -30,8 +30,10 @@ import silicon.world.meta.Signal;
 public class SignalSource extends Block {
     /** 信号覆盖半径（格） */
     public static final float RADIUS = 15f;
-    /** 信号最大强度 */
-    public static final int MAX_STRENGTH = 15;
+    /** 信号最大强度（中心原始强度；也是覆盖数字与强度条的标度上限） */
+    public static final int MAX_STRENGTH = 99;
+    /** 对数衰减的尺度（格）：raw = MAX·(1 − ln(1+d/σ)/ln(1+R/σ))，σ 越大核心区越平缓 */
+    public static final float LOG_SIGMA = 3f;
     /** 信号名称长度 */
     public static final int NAME_LENGTH = 4;
 
@@ -67,18 +69,20 @@ public class SignalSource extends Block {
 
     /**
      * 以 (cx, cy) 为信号源中心、指定世界坐标 (wx, wy) 处的信号强度（世界坐标为像素，1 格 = 8px）。
-     * 覆盖半径外（无信号区域）强度为 0；覆盖内按归一化正态分布衰减：
-     * 中心最强（15），随距离平滑衰减，半径 R 处精确归零（无悬崖断环）。
-     * 通用方法：信号源与信号中继器共用。
+     * 覆盖半径外（无信号区域）强度为 0；覆盖内按**对数距离衰减**：
+     *
+     * <pre>raw(d) = MAX_STRENGTH · ( 1 − ln(1 + d/σ) / ln(1 + R/σ) )      σ = {@link #LOG_SIGMA}（3 格）, R = {@link #RADIUS}（15 格）</pre>
+     *
+     * 中心满值（99）、半径 R 处精确归零（与旧高斯模型一样没有边缘悬崖），形状是"近场衰减快、远场衰减慢"的
+     * 对数距离损耗（log-distance path loss）：1 格 83 / 3 格 61 / 5 格 45 / 7.5 格 30 / 10 格 18 / 12 格 10 / 13.5 格 4。
+     * 通用方法：信号源、信号中继器、干扰器共用。
      */
     public static float strengthAt(float cx, float cy, float wx, float wy) {
         float dist = Mathf.dst(wx, wy, cx, cy) / 8f; // 像素 → 格
         if (dist >= RADIUS) return 0f; // 无信号区域强度为 0
-        // 正态分布衰减：σ = 6 格；减去边缘值并归一化，使 R 处精确为 0（消除旧版 0.66 的悬崖断环）
-        float sigma = 6f;
-        float g = (float) Math.exp(-(dist * dist) / (2f * sigma * sigma));
-        float edge = (float) Math.exp(-(RADIUS * RADIUS) / (2f * sigma * sigma));
-        return MAX_STRENGTH * (g - edge) / (1f - edge);
+        float scale = (float) Math.log(1.0 + RADIUS / LOG_SIGMA);
+        float loss = (float) Math.log(1.0 + dist / LOG_SIGMA);
+        return MAX_STRENGTH * (1f - loss / scale);
     }
 
     /**
@@ -212,7 +216,7 @@ public class SignalSource extends Block {
             return power != null && power.status > 0.001f;
         }
 
-        /** 本源在指定世界坐标处的原始信号强度（0~15；无信号、断电或被关闭（enabled=false）时为 0；干扰由 SignalChannel 统一计算） */
+        /** 本源在指定世界坐标处的原始信号强度（0~99；无信号、断电或被关闭（enabled=false）时为 0；干扰由 SignalChannel 统一计算） */
         public float strengthAt(float wx, float wy) {
             if (signal == null || !hasPower() || !enabled) return 0f;
             return SignalSource.strengthAt(x, y, wx, wy);

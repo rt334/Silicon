@@ -143,7 +143,7 @@ public class SignalSpectrum {
             spec.add(new Bar(
                     () -> fmtEff(effBuf[ci]),
                     () -> CH_COLORS[c],
-                    () -> effBuf[ci] / 15f
+                    () -> effBuf[ci] / (float) SignalSource.MAX_STRENGTH
             )).growX().minWidth(W_BAR_MIN).height(18f).pad(1f);
             spec.row();
         }

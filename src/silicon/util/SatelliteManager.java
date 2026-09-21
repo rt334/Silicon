@@ -82,12 +82,13 @@ public class SatelliteManager {
      *  名册条目 "unitId:code:channel:orbit:phaseBits"，条目间 ';'，空名册为空字段） */
     static final String SEP = "|";
     /** 每星信号强度（覆盖圆内、未被压制时的原始强度；多星按非相干功率合成 √(Σeᵢ²) 叠加）——轨道越高覆盖越大、强度越低：
-     *  LEO 1.5 / MEO 1.3 / GEO 1.1（首颗扣底噪后 1.0/0.8/0.6，均足以激活中继器转发），SSO 特例 1.5（小覆盖强信号） */
+     *  LEO 9.9 / MEO 8.58 / GEO 7.26 = 旧 15 标度值 ×6.6（与地面同一 0~99 标度；单星净空有效值 7.9/5.5/3.5，
+     *  均超过转发阈值 3.3），SSO 特例 9.9（小覆盖强信号） */
     public static float satelliteStrength(int orbit) {
         switch (orbit) {
-            case SatelliteConsole.ORBIT_MEO: return 1.3f;
-            case SatelliteConsole.ORBIT_GEO: return 1.1f;
-            default: return 1.5f; // LEO 与 SSO
+            case SatelliteConsole.ORBIT_MEO: return 8.58f;
+            case SatelliteConsole.ORBIT_GEO: return 7.26f;
+            default: return 9.9f; // LEO 与 SSO
         }
     }
 
@@ -376,7 +377,7 @@ public class SatelliteManager {
 
     // —— 卫星信号语义（覆盖/强度/干扰）——
 
-    /** 单条记录在 (wx,wy) 处的有效强度（SINR 比值制）：星下点覆盖圆内原始强度（LEO 1.5 / MEO 1.3 / GEO 1.1 / SSO 1.5）
+    /** 单条记录在 (wx,wy) 处的有效强度（SINR 比值制）：星下点覆盖圆内原始强度（LEO 9.9 / MEO 8.58 / GEO 7.26 / SSO 9.9）
      *  × 质量因子——SINR = raw / (底噪 + 其固化信道干扰)，SINR ≤ 1（功率压不过噪声+干扰）即无信号；
      *  信道未固化（-1，发射时编码无地面源）则不受信道干扰——"在轨广播"的物理化。
      *  供绑定判定（>0）、覆盖绘制聚合与叠星共用 */
@@ -420,7 +421,7 @@ public class SatelliteManager {
      * 各自按信噪比折算有效强度（{@link #satelliteEffAt}），再按非相干功率合成
      * {@link #stackEff  √(Σ eᵢ²)}——底噪已在每星质量因子内，不再末尾扣减。
      * 干扰压制语义：该编码功率 ≤ 底噪+同信道干扰（SINR ≤ 1）即无信号；随 SINR 升至 3.5 达满质量。
-     * 净空单星有效强度：LEO 1.2 / MEO 0.83 / GEO 0.53，均超过中继器激活阈值（>0.5），
+     * 净空单星有效强度：LEO 7.92 / MEO 5.49 / GEO 3.48，均超过中继器激活阈值（>3.3），
      * 单星即可让覆盖圆内的中继器转发；叠星按 √N 提升抗干扰裕度。
      * code 必须 non-null（中继器按编码判定；全量聚合在绘制层内联，共用 {@link #stackEff}）。
      */

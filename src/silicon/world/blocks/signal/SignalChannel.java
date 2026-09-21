@@ -11,15 +11,15 @@ import silicon.util.SatelliteManager;
  * - 环境底噪/热噪声（含噪声系数）：固定底噪 N0，参与信噪比分母
  * - 同信道干扰（CCI）：最强源为目标，其余同信道源强度之和为干扰
  * - 邻信道干扰（ACI）：其他信道源强度 × ACIR 泄漏系数
- * - 同信道/全信道干扰器：干扰强度（与信号同模型衰减）直接叠加；邻信道泄漏（ACIR_jam）
+ * - 同信道/全信道干扰器：干扰强度（与信号同模型衰减，0~99 标度）直接叠加；邻信道泄漏（ACIR_jam）
  * - 有效强度 = 信号功率 × 质量因子(SINR)：SINR = best / (N0 + 干扰总和)
  *   SINR ≤ 1（功率压不过噪声+干扰）→ 无信号；SINR ≥ SINR_REF → 满质量；中间平滑。
  *   干扰压的是信噪比（比值），不是从幅度扣功率——强信号天然抗弱干扰。
  */
 public class SignalChannel {
-    /** 底噪（强度域 0~15，含噪声系数；SINR 分母的固定项） */
-    public static final float NOISE_FLOOR = 0.5f;
-    /** SINR 参考阈值：SINR ≥ 此值（≈5.4dB）满质量——校准使 GEO 单星 0.53 / LEO 单星 1.2，
+    /** 底噪（强度域 0~99，含噪声系数；SINR 分母的固定项）——保持与原 15 标度相同的相对高度（MAX/30） */
+    public static final float NOISE_FLOOR = 3.3f;
+    /** SINR 参考阈值：SINR ≥ 此值（≈5.4dB）满质量——校准使 GEO 单星 3.48 / LEO 单星 7.92，
      *  与旧线性制的激活阈值（>0.5）与边缘绑定行为对齐 */
     public static final float SINR_REF = 3.5f;
 
