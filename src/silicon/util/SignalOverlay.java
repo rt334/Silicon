@@ -17,7 +17,9 @@ import mindustry.Vars;
 import mindustry.game.EventType;
 import mindustry.game.Team;
 import mindustry.gen.Building;
+import mindustry.gen.Groups;
 import mindustry.gen.Player;
+import mindustry.gen.Unit;
 import mindustry.ui.Fonts;
 import mindustry.ui.Styles;
 import silicon.world.blocks.signal.SignalChannel;
@@ -365,6 +367,43 @@ public class SignalOverlay {
         return best;
     }
 
+    /** 本帧"可能有信号"的包围盒（本队源 / 已激活中继 / 在轨卫星覆盖圆的并集）——逐格绘制前的廉价裁剪。
+     *  干扰器只会压制、不会产生信号，所以不参与包围盒。 */
+    private static final Rect coverBounds = new Rect();
+
+    static void computeCoverBounds(Team team) {
+        float r = SignalSource.RADIUS * 8f;
+        float minx = Float.MAX_VALUE, miny = Float.MAX_VALUE, maxx = -Float.MAX_VALUE, maxy = -Float.MAX_VALUE;
+        for (SignalSourceBuild sb : SignalSource.allSources(team)) {
+            if (sb.signal == null) continue;
+            minx = Math.min(minx, sb.x - r);
+            miny = Math.min(miny, sb.y - r);
+            maxx = Math.max(maxx, sb.x + r);
+            maxy = Math.max(maxy, sb.y + r);
+        }
+        for (SignalRelayBuild rb : SignalRelay.allRelays(team)) {
+            if (!rb.active) continue;
+            minx = Math.min(minx, rb.x - r);
+            miny = Math.min(miny, rb.y - r);
+            maxx = Math.max(maxx, rb.x + r);
+            maxy = Math.max(maxy, rb.y + r);
+        }
+        for (SatelliteManager.SatelliteRecord rec : SatelliteManager.satellites(team)) {
+            Unit u = Groups.unit.getByID(rec.unitId);
+            if (u == null) continue;
+            float cr = SatelliteManager.coverageRadius(rec.orbit);
+            minx = Math.min(minx, u.x - cr);
+            miny = Math.min(miny, u.y - cr);
+            maxx = Math.max(maxx, u.x + cr);
+            maxy = Math.max(maxy, u.y + cr);
+        }
+        if (minx > maxx) {
+            coverBounds.set(0f, 0f, 0f, 0f); // 本队没有任何发射机：整帧跳过
+        } else {
+            coverBounds.set(minx, miny, maxx - minx, maxy - miny);
+        }
+    }
+
     /** 数字模式：可见区域内逐格取各信道最大有效信号，每格只绘制一次（字号覆盖一格 8px）；颜色取最强来源的专属色 */
     static void drawNumbersOverlay(Team team, float alpha, String viewCode) {
         Rect view = Core.camera.bounds(Tmp.r1);
@@ -387,9 +426,11 @@ public class SignalOverlay {
             // 纵向沿用原基准字号调好的 -1.6 偏移（按字号倍率 k 缩放）
             float cell = 8f, half = cell / 2f;
             float k = scale / 0.2f;
+            computeCoverBounds(team); // 本帧覆盖包围盒：盒外格子直接跳过，避免每格跑完整 SINR 批算
             for (int gx = x0; gx <= x1; gx++) {
                 for (int gy = y0; gy <= y1; gy++) {
                     float wx = gx * cell + half, wy = gy * cell + half; // 格子中心（像素）
+                    if (!coverBounds.contains(wx, wy)) continue;
                     float s = bestSignal(team, wx, wy, bestSrc, bestCode, viewCode);
                     if (s <= 0f) continue;
                     int val = Mathf.round(s);
@@ -428,10 +469,12 @@ public class SignalOverlay {
         float rangeAlpha = Core.settings.getInt("signal.rangeAlpha", 45) / 100f;
         Building[] bestSrc = bestSrcTmp;
         String[] bestCode = bestCodeTmp;
+        computeCoverBounds(team); // 盒外格子直接跳过
         for (int gx = x0; gx <= x1; gx++) {
             for (int gy = y0; gy <= y1; gy++) {
                 // 格子中心（+4）：Fill.rect 以中心为锚，采样点也取中心，格子与世界格网对齐
                 float wx = gx * 8f + 4f, wy = gy * 8f + 4f;
+                if (!coverBounds.contains(wx, wy)) continue;
                 float s = bestSignal(team, wx, wy, bestSrc, bestCode, viewCode);
                 if (s <= 0f) continue;
                 float t = s / SignalSource.MAX_STRENGTH;

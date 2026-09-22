@@ -147,7 +147,8 @@ public class SignalJammer extends Block {
         @Override
         public void read(Reads read, byte revision) {
             super.read(read, revision);
-            jamChannel = read.i();
+            // 越界值会让该干扰器永远匹配不到任何信道（静默失效）——读档时夹取到合法范围
+            jamChannel = Mathf.clamp(read.i(), ALL, CHANNEL_MAX);
         }
     }
 }

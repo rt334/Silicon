@@ -26,4 +26,18 @@ public class Signal {
     public String toString() {
         return name;
     }
+
+    /**
+     * 编码格式校验（**唯一定义**）：4 位大写字母或数字。
+     * 信号源/中继器/卫星控制台的 configure 通道与读档都走它——这些字符串会作为 key 进入
+     * {@code SignalChannel.liveSrcCache}、覆盖绘制的颜色缓存与各处 UI，不校验会让畸形输入长期驻留。
+     */
+    public static boolean isValidCode(String code) {
+        if (code == null || code.length() != 4) return false;
+        for (int i = 0; i < 4; i++) {
+            char c = code.charAt(i);
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
+        }
+        return true;
+    }
 }

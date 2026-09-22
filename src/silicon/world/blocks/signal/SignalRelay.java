@@ -48,10 +48,16 @@ public class SignalRelay extends Block {
         update = true;
         // 需要供电才能工作：50 电力/秒（Mindustry 功耗按 /60 tick 计）
         consumePower(50f / 60f);
-        // 可配置：绑定信号源编号（空串=清除绑定）
+        // 可配置：绑定信号源编号（空串=清除绑定；非空必须是合法 4 位编码——tileConfig 是双向通道，
+        // 同队客户端可发包，不校验会让任意长字符串进入 liveSrcCache 与按钮文本）
         configurable = true;
-        config(String.class, (SignalRelayBuild b, String value) ->
-                b.selectedSource = (value == null || value.isEmpty()) ? null : value);
+        config(String.class, (SignalRelayBuild b, String value) -> {
+            if (value == null || value.isEmpty()) {
+                b.selectedSource = null;
+            } else if (silicon.world.meta.Signal.isValidCode(value)) {
+                b.selectedSource = value;
+            }
+        });
         // active 状态同步（服务器在激活状态变化时下发；客机应用后 H 覆盖可显示级联段）。
         // 客机伪造的 Boolean 会在下一 tick 的 updateActive 被本地重算覆盖，天然自愈。
         config(Boolean.class, (SignalRelayBuild b, Boolean v) -> {

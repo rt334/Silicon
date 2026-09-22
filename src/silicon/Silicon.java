@@ -74,6 +74,8 @@ public class Silicon extends Mod {
 
     /** 卫星状态周期广播计时（约 30 tick / 0.5s） */
     private static int satelliteBroadcastTick = 0;
+    /** sat-launch 速率限制（tick）：同一控制台两次请求的最小间隔，挡客户端重放刷扫描 */
+    public static final float LAUNCH_REQUEST_COOLDOWN = 30f;
 
     public Silicon() {
         Events.on(EventType.ClientLoadEvent.class, e -> {
@@ -177,6 +179,14 @@ public class Silicon extends Mod {
                         Call.clientPacketReliable(p.con, "sat-result", "disabled");
                         return;
                     }
+                    // 速率限制：每个请求都会做一遍"信号范围 + 1:1 配对"扫描（O(建筑×源)），
+                    // 改造客户端可高频重放刷 CPU；这里按控制台 0.5s 限流（合法双击本来也会因 produced
+                    // 已清空而失败，限流只挡重放，不影响正常操作）
+                    if (Time.time - cb.lastLaunchRequest < LAUNCH_REQUEST_COOLDOWN) {
+                        Call.clientPacketReliable(p.con, "sat-result", "fail");
+                        return;
+                    }
+                    cb.lastLaunchRequest = Time.time;
                     int orbit;
                     try {
                         orbit = Integer.parseInt(parts[2].trim());

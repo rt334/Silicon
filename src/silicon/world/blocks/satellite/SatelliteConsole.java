@@ -73,9 +73,15 @@ public class SatelliteConsole extends Block {
         configurable = true;
         // 需要供电：100 电力/秒（选中面板显示原版电力条）
         consumePower(POWER_CONSUMPTION);
-        // 卫星所属信号走原版 configure 机制同步（服务器 tileConfig 权威下发，各端 selectedSignal 一致）
-        config(String.class, (SatelliteConsoleBuild b, String value) ->
-                b.selectedSignal = (value == null || value.isEmpty()) ? null : value);
+        // 卫星所属信号走原版 configure 机制同步（服务器 tileConfig 权威下发，各端 selectedSignal 一致）；
+        // 编码格式统一走 Signal.isValidCode（与信号源/中继器同一校验，畸形串不进缓存与 UI）
+        config(String.class, (SatelliteConsoleBuild b, String value) -> {
+            if (value == null || value.isEmpty()) {
+                b.selectedSignal = null;
+            } else if (silicon.world.meta.Signal.isValidCode(value)) {
+                b.selectedSignal = value;
+            }
+        });
         // 发射轨道同步
         config(Integer.class, (SatelliteConsoleBuild b, Integer v) ->
                 b.selectedOrbit = Math.max(ORBIT_LEO, Math.min(ORBIT_SSO, v == null ? ORBIT_LEO : v)));
@@ -98,6 +104,8 @@ public class SatelliteConsole extends Block {
         private boolean consoleInRange = false;
         /** SSO 轨道按钮（动态灰化用） */
         private TextButton ssoBtn = null;
+        /** 上次收到 sat-launch 请求的时间（tick；速率限制用，不落存档） */
+        public float lastLaunchRequest = Float.NEGATIVE_INFINITY;
 
         /** 刷新绑定状态缓存（节流调用） */
         void refreshBinding() {
@@ -399,7 +407,8 @@ public class SatelliteConsole extends Block {
                 selectedOrbit = Math.max(ORBIT_LEO, Math.min(ORBIT_SSO, read.i()));
             }
             if (revision >= 2) {
-                int n = read.i();
+                // 名册条目数上限保护：损坏/被篡改的存档不能让读档陷入长循环
+                int n = Math.min(Math.max(read.i(), 0), 64);
                 for (int i = 0; i < n; i++) {
                     int unitId = read.i();
                     int channel = read.i();

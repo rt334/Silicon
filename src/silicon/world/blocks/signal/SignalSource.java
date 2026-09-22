@@ -51,14 +51,9 @@ public class SignalSource extends Block {
         consumePower(150f / 60f);
         // 用于客户端同步信号名（服务器通过 tileConfig 下发）
         config(String.class, (SignalSourceBuild b, String value) -> {
-            // tileConfig 双向通道同队客户端可发包:必须校验格式(4 位大写字母/数字),
+            // tileConfig 双向通道同队客户端可发包:必须校验格式(4 位大写字母/数字, 统一走 Signal.isValidCode),
             // 否则超长/任意字符串会进入 SignalOverlay 颜色缓存与各处 UI
-            if (value == null || value.length() != NAME_LENGTH) return;
-            for (int i = 0; i < value.length(); i++) {
-                char c = value.charAt(i);
-                boolean ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
-                if (!ok) return;
-            }
+            if (!Signal.isValidCode(value)) return;
             b.signal = new Signal(value);
             // 客机编码经 tileConfig 到位会改变上行门控判定（placed 时 signal 还是 null，缓存可能已记 false）
             SignalChannel.invalidateLiveSources();
@@ -288,7 +283,8 @@ public class SignalSource extends Block {
         public void read(Reads read, byte revision) {
             super.read(read, revision);
             String name = read.str();
-            signal = name.isEmpty() ? null : new Signal(name);
+            // 存档里的编码同样校验（旧档/损坏档里的畸形串不进入缓存与 UI）
+            signal = Signal.isValidCode(name) ? new Signal(name) : null;
             if (revision >= 1) {
                 channel = read.i();
             }
