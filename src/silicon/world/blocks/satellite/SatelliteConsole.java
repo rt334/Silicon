@@ -107,6 +107,22 @@ public class SatelliteConsole extends Block {
         /** 上次收到 sat-launch 请求的时间（tick；速率限制用，不落存档） */
         public float lastLaunchRequest = Float.NEGATIVE_INFINITY;
 
+        /**
+         * 绑定信号自动失效：绑定的编码在本队已无任何存活信号源（源被拆掉/被打掉）时自动清除绑定，
+         * 免得控制台一直挂着已经不存在的信号。判定用「编码是否还存在」而不是「是否在范围内」——
+         * 源仍在但断电/超距/被干扰时保留绑定，交由绑定状态行红字提示。
+         * 只在权威端判定，客机跟随 tileConfig 下发（避免网络延迟造成的误清）。
+         */
+        @Override
+        public void updateTile() {
+            if (selectedSignal == null || selectedSignal.isEmpty()) return;
+            if (Vars.net.active() && !SatelliteManager.isAuthority()) return;
+            if (!SignalChannel.hasLiveSource(team, selectedSignal)) {
+                selectedSignal = null;
+                configure("");
+            }
+        }
+
         /** 刷新绑定状态缓存（节流调用） */
         void refreshBinding() {
             consoleInRange = selectedSignal != null && !selectedSignal.isEmpty()
