@@ -422,10 +422,12 @@ public class SignalOverlay {
         String[] bestCode = bestCodeTmp;
         try {
             // 格子中心：tile 索引 gx 覆盖世界坐标 [gx*8, gx*8+8)，中心即 +4 —— 采样与绘字都用它。
-            // 横向用 arc 的 Align.center（与绘制同一套布局代码，1/2 位数都精确居中，不依赖度量猜测）；
-            // 纵向沿用原基准字号调好的 -1.6 偏移（按字号倍率 k 缩放）
+            // 横向与纵向都交给 arc 的 Align.center：arc 的 GlyphLayout 在 valign 分支按 FontData.capHeight
+            // 做垂直居中（GlyphLayout.setText），所以文字**视觉中心**正好落在格子中心——不要再叠加任何
+            // 手工像素偏移。旧代码沿用的 `-1.6f * k` 是切到 Align.center 之前的锚点残留，它把整片数字
+            // 相对地格整体上移（字号越大偏得越多，k=2.5 时达 4px = 半格），看起来就是"数字对不齐格子、
+            // 显示范围跟着偏移"。
             float cell = 8f, half = cell / 2f;
-            float k = scale / 0.2f;
             computeCoverBounds(team); // 本帧覆盖包围盒：盒外格子直接跳过，避免每格跑完整 SINR 批算
             for (int gx = x0; gx <= x1; gx++) {
                 for (int gy = y0; gy <= y1; gy++) {
@@ -445,7 +447,7 @@ public class SignalOverlay {
                     // 复用预计算字符串避免分配
                     String num = NUMBER_STRINGS[Mathf.clamp(val, 0, SignalSource.MAX_STRENGTH)];
                     Fonts.def.setColor(Tmp.c1);
-                    Fonts.def.draw(num, wx, wy - 1.6f * k, Align.center);
+                    Fonts.def.draw(num, wx, wy, Align.center);
                 }
             }
         } finally {
