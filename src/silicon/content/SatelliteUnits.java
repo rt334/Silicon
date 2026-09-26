@@ -1,5 +1,6 @@
 package silicon.content;
 
+import arc.Core;
 import arc.graphics.Color;
 import arc.graphics.Pixmap;
 import arc.graphics.Texture;
@@ -16,6 +17,7 @@ import mindustry.type.UnitType;
 import mindustry.world.meta.Env;
 import silicon.world.blocks.satellite.SatelliteConsole;
 import silicon.util.OrbitSatelliteController;
+import silicon.util.SatelliteManager;
 
 /**
  * 卫星实体机型（按轨道一型，共 4 型）：卫星是真实引擎单位（UnitEntity），轨道运动由
@@ -137,6 +139,19 @@ public class SatelliteUnits {
             }
 
             @Override
+            public void load() {
+                super.load();
+                // 贴图名兜底：Mindustry 用「内容名」找贴图，而 mod 内容名会被加上 "<mod>-" 前缀
+                // （MappableContent → ContentLoader.transformName），于是 sprites/units/satellite-leo.png
+                // 与 silicon-satellite-leo.png 两种命名都要能命中。super.load() 已试过带前缀的内容名，
+                // 这里再剥掉前缀试一次；两者都没有时 region.found() == false，交给 draw() 的程序化兜底。
+                if (!region.found()) {
+                    int i = name.indexOf('-');
+                    if (i > 0) region = Core.atlas.find(name.substring(i + 1));
+                }
+            }
+
+            @Override
             public void loadIcon() {
                 super.loadIcon();
                 // 原版 loadIcon 会把无 sprite 机型的图标指到 error 白方块——统一替换为程序化图标
@@ -145,27 +160,36 @@ public class SatelliteUnits {
 
             @Override
             public void draw(Unit unit) {
+                // 存在度：回绕进出场淡入淡出（与信号强度同一个系数，见 SatelliteManager.presence）
+                float p = SatelliteManager.presenceOf(unit.id);
+                if (p <= 0.004f) return;
                 // 无贴图兜底：程序化卫星造型（队色环+核心+太阳能板线）；
-                // 作者后续补 sprite（atlas 键 = 机型名）后自动切换为原版贴图绘制
+                // 交付 sprites/units/<机型名>.png 后自动切换为贴图绘制（load() 里的兜底负责命名兼容）
                 if (!region.found()) {
-                    drawFallback(unit);
+                    drawFallback(unit, p);
                 } else {
-                    super.draw(unit);
+                    Draw.color(1f, 1f, 1f, p);
+                    Draw.rect(region, unit.x, unit.y, unit.rotation - 90f);
+                    Draw.color();
+                    // 贴图本身不含队伍信息：中心补一个队色点，多队同图时仍能分辨归属
+                    Draw.color(unit.team.color, p);
+                    Fill.circle(unit.x, unit.y, 1.6f);
+                    Draw.reset();
                 }
             }
 
-            void drawFallback(Unit unit) {
+            void drawFallback(Unit unit, float alpha) {
                 // 视觉尺寸与 hitSize 解耦（hitSize=24 只为悬停窗口，造型保持小卫星观感）
                 float r = 6.5f;
                 Color tc = unit.team.color;
                 // 太阳能板横线
-                Lines.stroke(1.2f, tc.cpy().mul(0.7f));
+                Lines.stroke(1.2f, tc.cpy().mul(0.7f).a(alpha));
                 Lines.line(unit.x - r * 2f, unit.y, unit.x + r * 2f, unit.y);
                 // 本体环
-                Lines.stroke(1.5f, tc);
+                Lines.stroke(1.5f, tc.a(alpha));
                 Lines.circle(unit.x, unit.y, r);
                 // 核心 + 遥测闪烁
-                Draw.color(tc);
+                Draw.color(tc, alpha);
                 Fill.circle(unit.x, unit.y, r * 0.45f);
                 Fill.circle(unit.x, unit.y, r * 0.2f + (float) Math.abs(Mathf.sin(unit.id + Time.time / 40f)) * r * 0.15f);
                 // 复位笔画宽度（Draw.reset 只复位颜色,Lines.stroke 是独立静态值,残留会影响后续 Lines 绘制）
