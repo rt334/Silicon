@@ -104,7 +104,7 @@ if (-not $SkipRelease) {
         }
 
         $up = & $gcurl -sS -H $authHeader -H $uaHeader -H 'Content-Type: application/java-archive' `
-            -o $uploadFile -w '%{http_code}' -F "data=@$(Get-FullPath $Jar)" `
+            -o $uploadFile -w '%{http_code}' --data-binary "@$(Get-FullPath $Jar)" `
             "https://uploads.github.com/repos/$Repo/releases/$($rel.id)/assets?name=$AssetName" 2>$null
         Write-Host "[fork-release] upload asset: HTTP $up"
         $u = (Read-Text $uploadFile) | ConvertFrom-Json
