@@ -32,9 +32,12 @@ import silicon.world.blocks.signal.SignalJammer;
 /**
  * 卫星系统全局状态（按队伍）：
  * - 待发射卫星：由卫星发射中枢生产（每中枢同时 1 颗），生产完成后登记；燃料（石油）与缓冲电力（10000）均存储于中枢
- * - 在轨卫星：真实引擎单位（SatelliteUnits 四机型），由卫星控制台发射；沿以地图为中心的圆轨道飞行，
- *   覆盖为星下点覆盖圆（半径随图幅短半轴等比缩放，250×250 基准 LEO 40 / MEO 60 / GEO 80 / SSO 25 格，
- *   轨道越高覆盖越大、强度越低），不再全图短路；
+ * - 在轨卫星：真实引擎单位（SatelliteUnits 四机型），由卫星控制台发射；**不是圆轨道**，而是
+ *   「回绕扫描 + 正弦摆动」的星下点轨迹（见 {@link #scanXAt}/{@link #scanYAt}）：
+ *   LEO/MEO 东西向匀速回绕（到头从另一侧进入）+ 南北正弦摆动，SSO 对偶（南北回绕 + 东西摆动 = 极轨），
+ *   GEO 真定点（与时间无关）。正弦轴按该轨道覆盖半径内缩，回绕进出场按 {@link #WRAP_FADE} 淡入淡出；
+ *   覆盖为星下点覆盖圆（半径随图幅短半轴等比缩放，250×250 基准 LEO 40 / MEO 60 / SSO 25 格，
+ *   GEO 整图定点；轨道越高覆盖越大、强度越低）；
  *   只能被 scripted 伤害（unit.damage()，如 ASAT 拦截塔）击落，地面单位/炮塔对其完全失明
  * - 名册 SatelliteRecord（每星一条：unitId/编码/信道/轨道/相位）是卫星语义的唯一载体：
  *   编码决定其为哪条信号提供覆盖，信道在发射时从所选编码的信号源固化（源被拆不影响干扰判定），
@@ -320,8 +323,39 @@ public class SatelliteManager {
      *  轨迹族随时间铺满全图（含现行圆轨道永远扫不到的四角）；δ 取黄金比×0.1，永不严格重复 */
     public static final float SCAN_DRIFT = 0.0618034f;
 
-    /** 轨迹边缘内缩（px）：卫星扫过全部图幅但不越界 */
+    /** 轨迹边缘内缩（px）：正弦轴按该轨道的**覆盖半径**内缩，让覆盖圆尽量落在图内
+     *  （旧值固定 8px 会让贴边时大半个圆跑到图外，"名义覆盖率"名不副实）；
+     *  回绕轴不内缩——卫星本就该从图的一侧进场、另一侧离场，靠 {@link #WRAP_FADE} 淡入淡出衔接 */
+    public static float scanInset(int orbit) {
+        return Mathf.clamp(coverageRadius(orbit), 0f, mapHalfPx() * 0.8f);
+    }
+
+    /** 轨迹边缘内缩下限（px）：图幅很小时避免正弦轴被压成一条线 */
     public static final float SCAN_MARGIN = 8f;
+
+    /** 回绕进出场淡入淡出比例（占一圈的比例）：相位落在 [0, WRAP_FADE] 与 [1-WRAP_FADE, 1) 时
+     *  存在度线性升/降——卫星与其覆盖、信号强度同步淡入淡出，消除回绕瞬间的"瞬移"观感 */
+    public static final float WRAP_FADE = 0.06f;
+
+    /**
+     * 卫星当前"存在度"（0~1）：回绕轴的进出场淡入淡出系数。GEO 定点恒为 1。
+     * <p>同时作用于：卫星本体的绘制透明度、{@link #satelliteRawAt} 的原始强度
+     * （因此覆盖显示与 SINR 判定同步变化，不会出现"图已经没了但信号还在"）。
+     */
+    public static float presence(int orbit, float u) {
+        if (orbit == SatelliteConsole.ORBIT_GEO) return 1f;
+        float f = u - (float) Math.floor(u);
+        if (f < WRAP_FADE) return f / WRAP_FADE;
+        if (f > 1f - WRAP_FADE) return (1f - f) / WRAP_FADE;
+        return 1f;
+    }
+
+    /** 卫星**实体**的存在度（供绘制用）：按 unitId 查名册取该记录的存在度；
+     *  名册缺失（读档竞态、尚未登记）时按 1 处理，避免卫星在补建名册前隐形 */
+    public static float presenceOf(int unitId) {
+        SatelliteRecord r = recordOf(unitId);
+        return r == null ? 1f : presence(r.orbit, scanU(r));
+    }
 
     /** 扫描进度 u（1.0 = 沿主轴横穿全图一圈（回绕）；GEO 定点不使用本值）：
      *  相位是**自累加**的存档字段（{@link OrbitSatelliteController} 每帧 += delta/周期），
@@ -331,21 +365,21 @@ public class SatelliteManager {
         return r.phase;
     }
 
-    /** 指定轨道与进度 u 的星下点 X：LEO/MEO = 经度回绕（东西向匀速），SSO = 正弦摆动（极轨） */
+    /** 指定轨道与进度 u 的星下点 X：LEO/MEO = 经度回绕（东西向匀速），SSO = 正弦摆动（极轨，按覆盖半径内缩） */
     public static float scanXAt(int orbit, float u) {
         if (orbit == SatelliteConsole.ORBIT_SSO) {
-            float amp = Vars.world.unitWidth() / 2f - SCAN_MARGIN;
+            float amp = Math.max(Vars.world.unitWidth() / 2f - scanInset(orbit), SCAN_MARGIN);
             return Vars.world.unitWidth() / 2f + amp * Mathf.sin((1f + SCAN_DRIFT) * u * Mathf.PI2);
         }
         return (u - (float)Math.floor(u)) * Vars.world.unitWidth();
     }
 
-    /** 指定轨道与进度 u 的星下点 Y：LEO/MEO = 正弦摆动（真实 LEO 地面轨迹形态），SSO = 纬度回绕（南北向） */
+    /** 指定轨道与进度 u 的星下点 Y：LEO/MEO = 正弦摆动（按覆盖半径内缩），SSO = 纬度回绕（南北向） */
     public static float scanYAt(int orbit, float u) {
         if (orbit == SatelliteConsole.ORBIT_SSO) {
             return (u - (float)Math.floor(u)) * Vars.world.unitHeight();
         }
-        float amp = Vars.world.unitHeight() / 2f - SCAN_MARGIN;
+        float amp = Math.max(Vars.world.unitHeight() / 2f - scanInset(orbit), SCAN_MARGIN);
         return Vars.world.unitHeight() / 2f + amp * Mathf.sin((1f + SCAN_DRIFT) * u * Mathf.PI2);
     }
 
@@ -388,12 +422,13 @@ public class SatelliteManager {
         return raw * SignalChannel.sinrQuality(raw, SignalChannel.NOISE_FLOOR + jam);
     }
 
-    /** 单条记录在 (wx,wy) 处的原始强度（未折算干扰）：覆盖圆内为该轨道定值，圆外 0 */
+    /** 单条记录在 (wx,wy) 处的原始强度（未折算干扰）：覆盖圆内为该轨道定值 × 存在度，圆外 0
+     *  （存在度见 {@link #presence}：回绕进出场时强度同步淡出，避免"瞬移"与"图没了信号还在"） */
     public static float satelliteRawAt(SatelliteRecord r, float wx, float wy) {
         Unit u = Groups.unit.getByID(r.unitId);
         if (u == null) return 0f;
         if (!u.within(wx, wy, coverageRadius(r.orbit))) return 0f;
-        return satelliteStrength(r.orbit);
+        return satelliteStrength(r.orbit) * presence(r.orbit, scanU(r));
     }
 
     /**
