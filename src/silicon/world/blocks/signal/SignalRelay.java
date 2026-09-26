@@ -148,6 +148,16 @@ public class SignalRelay extends Block {
 
         @Override
         public void updateTile() {
+            // 绑定信号自动失效：绑定的编码在本队已无任何存活信号源（源被拆掉/被打掉）时清除绑定。
+            // 编码是随机生成的，源拆掉后无法再建出同名源，留着绑定只会永久显示"信号不足"。
+            // 判定用「编码是否还存在」而非「是否在范围内」——源仍在但断电/超距/被干扰时保留绑定。
+            // 只在权威端判定，客机跟随 tileConfig 下发（避免网络延迟造成的误清）。
+            if (selectedSource != null && !selectedSource.isEmpty()
+                    && (!Vars.net.active() || silicon.util.SatelliteManager.isAuthority())
+                    && !SignalChannel.hasLiveSource(team, selectedSource)) {
+                selectedSource = null;
+                configure("");
+            }
             // 实时检测能否转发：每 tick 按 SINR 有效强度重算——干扰器开关、信号源断电/禁用、
             // 绑定变更、级联上下游变化都在同一 tick 生效。
             // 远处空闲中继由 SignalChannel.groundEffAt 的廉价前置短路（只做距离衰减，不跑完整批算），

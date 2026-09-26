@@ -96,6 +96,7 @@ eff = best × q
 | 建筑绑定 | eff > 0 | ⟺ 功率 > 底噪+干扰(SINR > 1);**地面与卫星都按 SINR** |
 | 中继器激活/转发 | eff > 3.3 | **同一阈值两条链路**:地面 = `SignalChannel.groundEffAt`(SINR),卫星 = `satelliteStrengthAt`(0~99 标度下 = 上限/30) |
 | 上行门控 | hasLiveSource | 编码的地面源全灭 → 卫星停止广播(删源即断链) |
+| 绑定自动失效 | hasLiveSource = false | 绑定的编码在本队**已无任何存活信号源**时,控制台与中继器**自动清除绑定**(每 tick,权威端判定后经 tileConfig 下发);判定只看"编码是否还存在"——源仍在但断电/超距/被干扰时保留绑定,由状态行红字提示 |
 | 1:1 配对 | inGroundSignalRange | 只算地面层,且按 SINR(eff > 0)——干扰同样会让配对判定失败 |
 
 ### 4.1 实时性
