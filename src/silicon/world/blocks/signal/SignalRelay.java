@@ -81,7 +81,7 @@ public class SignalRelay extends Block {
         dirty = false;
         relayCache.clear();
         for (Building b : Groups.build) {
-            if (b instanceof SignalRelayBuild rb) {
+            if (b instanceof SignalRelayBuild rb && !rb.removed) {
                 relayCache.get(rb.team, Seq::new).add(rb);
             }
         }
@@ -90,7 +90,18 @@ public class SignalRelay extends Block {
     /** 收集某队伍的所有中继器（走缓存） */
     public static Seq<SignalRelayBuild> allRelays(Team team) {
         rebuildCache();
-        return relayCache.get(team, new Seq<>());
+        Seq<SignalRelayBuild> list = relayCache.get(team, new Seq<>());
+        // 自愈：同 SignalSource.allSources——拆除流程中 onRemoved() 早于建筑离开 Groups.build，
+        // 那一瞬间触发的重建会把死中继器带回缓存，之后 H 覆盖会一直画出不存在的级联段。
+        if (list.size > 0) {
+            for (int i = list.size - 1; i >= 0; i--) {
+                SignalRelayBuild rb = list.get(i);
+                if (rb.removed || !rb.isValid()) {
+                    list.remove(i);
+                }
+            }
+        }
+        return list;
     }
 
     /** 放置预览显示信号范围（同信号源） */
@@ -115,16 +126,23 @@ public class SignalRelay extends Block {
         private String lastSrcSignature = "";
         /** 配置面板源按钮组（选中态实时同步用；面板关闭后无引用也无妨） */
         private arc.scene.ui.ButtonGroup<arc.scene.ui.TextButton> srcBtnGroup = null;
+        /** 是否已进入拆除流程（onRemoved 置位）：拆除瞬间触发的缓存重建不得再把本中继器算进去 */
+        public boolean removed;
 
         @Override
         public void onProximityAdded() {
             super.onProximityAdded();
+            removed = false;
             SignalRelay.markDirty();
         }
 
         @Override
         public void onRemoved() {
             super.onRemoved();
+            removed = true;
+            for (Seq<SignalRelayBuild> list : relayCache.values()) {
+                list.remove(this, true);
+            }
             SignalRelay.markDirty();
         }
 

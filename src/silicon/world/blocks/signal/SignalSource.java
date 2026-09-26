@@ -97,7 +97,7 @@ public class SignalSource extends Block {
         dirty = false;
         sourceCache.clear();
         for (Building b : Groups.build) {
-            if (b instanceof SignalSourceBuild sb) {
+            if (b instanceof SignalSourceBuild sb && !sb.removed) {
                 sourceCache.get(sb.team, Seq::new).add(sb);
             }
         }
@@ -106,7 +106,24 @@ public class SignalSource extends Block {
     /** 收集某队伍的所有信号源（走缓存；get 的 Supplier 形式避免缓存未命中之外也分配） */
     public static Seq<SignalSourceBuild> allSources(Team team) {
         rebuildCache();
-        return sourceCache.get(team, Seq::new);
+        Seq<SignalSourceBuild> list = sourceCache.get(team, Seq::new);
+        // 自愈：缓存里不允许留下已拆除的源。拆除流程里 onRemoved() 早于建筑真正离开 Groups.build，
+        // 那一刻若有代码查询源列表（中继器每 tick 的实时判定、频谱面板、H 覆盖、控制台面板），
+        // 重建出来的缓存会把死源一起带回来并把 dirty 清掉，此后死源就永久留在列表里。
+        // 这里按「是否仍是本格建筑」逐项剔除，保证任何一次查询之后缓存都不含死源
+        // （每队信号源数量级很小，代价可忽略）。
+        if (list.size > 0) {
+            boolean pruned = false;
+            for (int i = list.size - 1; i >= 0; i--) {
+                SignalSourceBuild sb = list.get(i);
+                if (sb.removed || !sb.isValid()) {
+                    list.remove(i);
+                    pruned = true;
+                }
+            }
+            if (pruned) SignalChannel.invalidateLiveSources();
+        }
+        return list;
     }
 
     /** 生成一个未被使用的 4 字符信号名（大写字母 A-Z + 数字 0-9） */
@@ -164,6 +181,8 @@ public class SignalSource extends Block {
         public Signal signal;
         /** 信道（1~5，默认 1）：同信道信号互相隔离；被干扰器压制时失效 */
         public int channel = 1;
+        /** 是否已进入拆除流程（onRemoved 置位）：拆除瞬间触发的缓存重建不得再把本源算进去 */
+        public boolean removed;
 
         @Override
         public void placed() {
@@ -183,6 +202,7 @@ public class SignalSource extends Block {
         @Override
         public void onProximityAdded() {
             super.onProximityAdded();
+            removed = false;
             markDirty();
             // 尽力向客户端重发信号名。注意:读档时 onProximityAdded 先于 read() 执行,
             // 此时 signal 还是 null,此处的重发实际不生效——真正的客机同步靠 MP 世界
@@ -195,6 +215,12 @@ public class SignalSource extends Block {
         @Override
         public void onRemoved() {
             super.onRemoved();
+            // onRemoved() 在建筑离开 Groups.build 之前调用：先把自己从缓存里摘掉并置 removed 标记，
+            // 这样即使拆除瞬间有代码触发缓存重建，死源也不会回流（rebuildCache 里还会再挡一次）
+            removed = true;
+            for (Seq<SignalSourceBuild> list : sourceCache.values()) {
+                list.remove(this, true);
+            }
             markDirty();
         }
 
