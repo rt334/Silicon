@@ -22,14 +22,14 @@ import silicon.world.blocks.signal.SignalSource;
  * 本点干扰功率 I（SINR 分母去掉底噪） | 该点可用有效强度条（SINR 折算后，含卫星层 RSS 合成）。
  * <p>
  * <b>卫星层</b>：绑定信道的在轨卫星（channel ≥ 1）按信道各自 SINR 折算（satelliteEffAt，底噪在
- * 质量因子内）后对数叠加（stackEff），再与地面强度 RSS 功率合成 total = √(g² + s²)——与 H 覆盖
- * 层模型一致；未绑定卫星（channel < 1）不进信道视图（仅覆盖显示，见覆盖层）。
+ * 质量因子内）后按非相干功率合成（√(Σeᵢ²)），再与地面强度 RSS 功率合成——与 H 覆盖层模型一致
+ * （两次合成是同一个 √(Σ·²) 运算，可结合）；未绑定卫星（channel < 1）不进信道视图（仅覆盖显示）。
  * <p>
  * <b>布局防重叠（实测踩坑）</b>：BlockConfigFragment 在面板打开时按空标签 pack 一次定宽，节流刷新
  * 填入文本后外层不会重新加宽——列宽必须固定且按最宽文本预留，标签一律左对齐（居中文本溢出会向
  * 两侧渗透）；整段频谱放进单个嵌套表并对宿主声明 minWidth，杜绝宿主列宽挤压。
  * <p>
- * 性能：15 tick 节流刷新；标签 setText / Bar 值每节流周期更新，无逐帧字符串分配。
+ * 性能：5 tick（约 12 Hz）节流刷新；标签 setText / Bar 值每节流周期更新，无逐帧字符串分配。
  * 静态缓冲复用（同一时刻只有一个配置面板打开；面板关闭后 update 链随场景移除自动停止）。
  */
 public class SignalSpectrum {
@@ -54,9 +54,9 @@ public class SignalSpectrum {
     private static final float[] intBuf = new float[SignalJammer.CHANNEL_MAX + 1];
     @SuppressWarnings("unchecked")
     private static final Building[] srcBuf = new Building[SignalJammer.CHANNEL_MAX + 1];
-    /** 卫星层按信道聚合缓冲（sum/max 计 stackEff，cnt 计占用） */
-    private static final float[] satSum = new float[SignalJammer.CHANNEL_MAX + 1];
-    private static final float[] satMax = new float[SignalJammer.CHANNEL_MAX + 1];
+    /** 每信道结果所属编码（由 SignalChannel.usableAll 填充；无信号时 null） */
+    private static final String[] codeBuf = new String[SignalJammer.CHANNEL_MAX + 1];
+    /** 每信道在轨卫星计数（占用列 = 信道拥挤度） */
     private static final int[] satCnt = new int[SignalJammer.CHANNEL_MAX + 1];
     private static final LabelRef[] occLabels = new LabelRef[SignalJammer.CHANNEL_MAX + 1];
     private static final LabelRef[] itfLabels = new LabelRef[SignalJammer.CHANNEL_MAX + 1];
@@ -84,6 +84,11 @@ public class SignalSpectrum {
 
         spec.add(Core.bundle.get("block.silicon-signal.spectrum.title"))
                 .colspan(5).center().color(Pal.accent).padTop(6f).padBottom(1f);
+        spec.row();
+        // 聚合范围行：本面板的"可用强度"列按哪个口径算（源=自身编码 / 中继=绑定编码 / 检测器=逐信道最强编码）
+        LabelRef scopeRef = new LabelRef();
+        scopeRef.label = spec.add("").colspan(5).center().color(Color.lightGray).padBottom(2f).get();
+        scopeRef.label.setAlignment(arc.util.Align.center);
         spec.row();
         // 表头（与数据行同列宽）：显式 Label 且 setAlignment(center)——单元格内居中 + 标签文本内
         // 居中双重保障（仅靠 Cell.center() 实测未生效，见用户反馈）
@@ -135,7 +140,7 @@ public class SignalSpectrum {
             spec.add(new Bar(
                     () -> fmtEff(effBuf[ci]),
                     () -> CH_COLORS[c],
-                    () -> effBuf[ci] / 15f
+                    () -> effBuf[ci] / (float) SignalSource.MAX_STRENGTH
             )).growX().minWidth(W_BAR_MIN).height(18f).pad(1f);
             spec.row();
         }
@@ -146,32 +151,33 @@ public class SignalSpectrum {
         parent.row();
 
         parent.update(() -> {
-            tick = (tick + 1) % 15;
+            // 5 tick（约 12 Hz）刷新：卫星是移动的，节流太长会让面板数字明显落后于 H 覆盖（看起来两边"不一致"）
+            tick = (tick + 1) % 5;
             if (tick != 0) return;
             // 建筑可能在面板打开期间被摧毁——失效后立即停止采样（面板由 BlockConfigFragment 隐藏）
             if (at == null || !at.isValid()) return;
-            SignalChannel.effectiveAll(at.team, at.x, at.y, effBuf, srcBuf, intBuf);
-            // 卫星层按信道聚合：绑定信道的卫星各自 SINR 折算后对数叠加，再与地面 RSS 功率合成
-            for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
-                satSum[ch] = 0f;
-                satMax[ch] = 0f;
-                satCnt[ch] = 0;
-            }
+            // 聚合范围 = 本面板所属编码：信号源=自身编码、中继=绑定编码、检测器=无（逐信道最强编码）。
+            // 判定端（中继激活/控制台绑定）本来就是逐编码的，这里对齐后"可用强度"列就是该编码真实可用的值。
+            String scope = silicon.util.SignalOverlay.codeOf(at);
+            // 显示端唯一实现：地面 SINR ⊕ 同编码卫星 RSS 合成（与 H 覆盖完全同一函数——
+            // 所以 H 上的数字必然等于这里最高的那一行，不会两处对不上）
+            SignalChannel.usableAll(at.team, at.x, at.y, effBuf, srcBuf, intBuf, codeBuf, scope);
+            // 占用计数（信道拥挤度）：全部编码的在轨卫星，逐信道计数
+            for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) satCnt[ch] = 0;
             for (SatelliteManager.SatelliteRecord r : SatelliteManager.satellites(at.team)) {
-                // 上行门控与覆盖层一致：编码卫星在其地面源全部消失后停止广播
-                if (r.code != null && !SignalChannel.hasLiveSource(at.team, r.code)) continue;
+                if (r.code != null && !SignalChannel.hasLiveSource(at.team, r.code)) continue; // 上行门控
                 int rc = r.channel;
                 if (rc < 1 || rc > SignalJammer.CHANNEL_MAX) continue; // 未绑定卫星不进信道视图
-                float e = SatelliteManager.satelliteEffAt(r, at.x, at.y);
-                if (e <= 0f) continue;
-                satSum[rc] += e;
-                if (e > satMax[rc]) satMax[rc] = e;
-                satCnt[rc]++;
+                if (SatelliteManager.satelliteEffAt(r, at.x, at.y) > 0f) satCnt[rc]++;
             }
             int cur = currentChannel.get();
+            scopeRef.label.setText(scope == null
+                    ? Core.bundle.get("block.silicon-signal.spectrum.scope.auto")
+                    : Core.bundle.format("block.silicon-signal.spectrum.scope.code", scope));
             for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
                 int src = 0, jam = 0;
-                // 占用计数与实际发射条件一致（signal/供电/enabled），断电或关闭的源不计入
+                // 占用计数与实际发射条件一致（signal/供电/enabled），断电或关闭的源不计入；
+                // 占用是"信道拥挤度"（含所有编码与其他队伍的干扰器），与按编码的强度列口径不同
                 for (SignalSource.SignalSourceBuild sb : SignalSource.allSources(at.team)) {
                     if (sb.emitting() && sb.channel == ch) src++;
                 }
@@ -184,11 +190,8 @@ public class SignalSpectrum {
                 }
                 // 卫星计入占用：与地面源一样占用信道带宽
                 src += satCnt[ch];
-                // RSS 功率合成：total = √(g² + s²)
-                float s = Math.max(0f, SatelliteManager.stackEff(satSum[ch], satMax[ch]));
-                if (s > 0f) {
-                    effBuf[ch] = (float) Math.sqrt((double) effBuf[ch] * effBuf[ch] + (double) s * s);
-                }
+                // 强度列：usableAll 已把卫星层按同一编码 RSS 合成进 effBuf（H 覆盖用的是同一个函数，
+                // 所以 H 上的数字 = 这里最高的一行，两边不会再出现不一致）
                 occLabels[ch].label.setText(Core.bundle.format("block.silicon-signal.spectrum.src", src, jam));
                 // I 标签必须预格式化：bundle.format 吃原始 float 会渲染全精度小数
                 itfLabels[ch].label.setText(Core.bundle.format("block.silicon-signal.spectrum.i",

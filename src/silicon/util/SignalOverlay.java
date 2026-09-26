@@ -11,12 +11,15 @@ import arc.scene.ui.Label;
 import arc.struct.ObjectIntMap;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
+import arc.util.Align;
 import arc.util.Tmp;
 import mindustry.Vars;
 import mindustry.game.EventType;
 import mindustry.game.Team;
 import mindustry.gen.Building;
+import mindustry.gen.Groups;
 import mindustry.gen.Player;
+import mindustry.gen.Unit;
 import mindustry.ui.Fonts;
 import mindustry.ui.Styles;
 import silicon.world.blocks.signal.SignalChannel;
@@ -70,8 +73,14 @@ public class SignalOverlay {
     private static final ObjectIntMap<Float> hueCount = new ObjectIntMap<>();
     /** 缩放阈值（相机视野宽度，像素）：视野宽于该值（缩小视角）显示蓝色范围，否则显示数字 */
     public static final float ZOOM_THRESHOLD_WIDTH = 600f;
-    /** 预计算的强度数字字符串（0~15），避免每帧分配 */
-    private static final String[] NUMBER_STRINGS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"};
+    /** 预计算的强度数字字符串（0~MAX_STRENGTH），避免每帧分配 */
+    private static final String[] NUMBER_STRINGS = new String[SignalSource.MAX_STRENGTH + 1];
+
+    static {
+        for (int i = 0; i < NUMBER_STRINGS.length; i++) {
+            NUMBER_STRINGS[i] = String.valueOf(i);
+        }
+    }
 
     /** 信号专属颜色：色相动态分配——新编码选择与所有已用颜色色相距离最大、且与所在区块背景色相差异大的色相
      *  （避开背景相近色，优先补色方向；bgHue=-1 表示背景无彩/未知，不限制）。
@@ -246,19 +255,24 @@ public class SignalOverlay {
         }
         // 淡入淡出：透明度每帧向目标过渡（约 6 帧完成）
         displayAlpha = Mathf.lerp(displayAlpha, visible ? 1f : 0f, 0.15f);
+        // 当前查看的编码只解析一次/帧（鼠标悬停或配置面板打开的建筑），逐格复用
+        String view = viewCode();
         if (displayAlpha > 0.01f) {
-            drawOverlay(team, displayAlpha);
+            drawOverlay(team, displayAlpha, view);
         }
         if (visible) {
-            showHint();
+            showHint(view);
         } else if (displayAlpha < 0.01f) {
             hideHint();
         }
     }
 
-    /** 显示底部提示小字（屏幕下方中间） */
-    static void showHint() {
+    /** 显示底部提示小字（屏幕下方中间）+ 当前聚合范围（查看的编码 / 自动） */
+    static void showHint(String viewCode) {
         if (hintLabel == null) return;
+        hintLabel.setText(Core.bundle.get("signal.overlay.hint") + (viewCode == null
+                ? Core.bundle.get("signal.overlay.view.auto")
+                : Core.bundle.format("signal.overlay.view.code", viewCode)));
         hintLabel.setPosition(Core.graphics.getWidth() / 2f - hintLabel.getPrefWidth() / 2f, 40f);
         hintLabel.visible = true;
     }
@@ -267,7 +281,7 @@ public class SignalOverlay {
         if (hintLabel != null) hintLabel.visible = false;
     }
 
-    static void drawOverlay(Team team, float alpha) {
+    static void drawOverlay(Team team, float alpha, String viewCode) {
         // 显式抬高绘制层级：drawOver 时点当前 z 不确定，锁定在 overlayUI 之上保证压过所有世界内容
         Draw.z(mindustry.graphics.Layer.overlayUI + 1f);
         // 视野宽（缩小视角）显示蓝色范围；视野窄（放大视角）显示数字
@@ -278,12 +292,11 @@ public class SignalOverlay {
             displayAlpha = 0f;
         }
         if (rangeMode) {
-            // 范围模式：逐格合成绘制（地面信号源与在轨卫星同一模型）——每格只画最强一路，
-            // 卫星信号与信号源共用同一透明度公式与强度标度，不再有独立的卫星覆盖盘二次叠画
-            drawRangeComposite(team, alpha);
+            // 范围模式：逐格合成绘制（地面信号源与在轨卫星同一模型，按同一编码聚合）
+            drawRangeComposite(team, alpha, viewCode);
         } else {
-            // 数字模式：逐格取各信道最大有效信号（含底噪/CCI/ACI/干扰器），每格只绘制一次
-            drawNumbersOverlay(team, alpha);
+            // 数字模式：逐格取该格最强编码的有效信号（含底噪/CCI/ACI/干扰器），每格只绘制一次
+            drawNumbersOverlay(team, alpha, viewCode);
         }
         Draw.reset();
     }
@@ -291,57 +304,108 @@ public class SignalOverlay {
     /** 每信道有效强度/最强源缓冲（静态复用） */
     private static final float[] effBuf = new float[SignalJammer.CHANNEL_MAX + 1];
     private static final Building[] srcBuf = new Building[SignalJammer.CHANNEL_MAX + 1];
+    /** 每信道结果所属编码缓冲（按编码视图 / 自动模式下该信道最强身份的编码） */
+    private static final String[] codeBuf = new String[SignalJammer.CHANNEL_MAX + 1];
     /** 最强来源/最强卫星编码出参复用（渲染线程内串行使用,两处 draw 循环共享一份） */
     private static final Building[] bestSrcTmp = new Building[1];
     private static final String[] bestCodeTmp = new String[1];
 
-    /** 每格最大有效信号（一次遍历所有信道，与卫星层 RSS 功率合成）；返回有效强度、最强来源与最强卫星编码。
-     *  卫星层模型与绑定/中继一致（SINR 比值制）：覆盖该格的卫星各自按信噪比折算有效强度
-     *  （satelliteEffAt，底噪在质量因子内）后对数叠加（stackEff），不再末尾扣底噪 */
-    static float bestSignal(Team team, float wx, float wy, Building[] bestSrcOut, String[] bestCodeOut) {
-        // 批量计算所有信道（一次遍历全部源，按信道分摊——比逐信道调用快约 5 倍）
-        SignalChannel.effectiveAll(team, wx, wy, effBuf, srcBuf);
-        float bestStr = 0f;
+    /**
+     * 当前查看的编码（显示端按它聚合，与判定端口径一致）：
+     * ① 配置面板打开的建筑（信号源=自身编码 / 中继=绑定编码 / 控制台=所选编码）；
+     * ② 鼠标悬停的建筑（同上，便于随手核对某个中继的覆盖）；
+     * ③ 都没有 → null = 自动模式（每格取最强的那**一个**编码，而不是跨编码求和）。
+     */
+    static String viewCode() {
+        Building b = null;
+        if (Vars.control != null && Vars.control.input != null && Vars.control.input.config != null
+                && Vars.control.input.config.isShown()) {
+            b = Vars.control.input.config.getSelected();
+        }
+        if (b == null && Vars.world != null) {
+            arc.math.geom.Vec2 m = Core.input.mouseWorld();
+            b = Vars.world.buildWorld(m.x, m.y);
+        }
+        // 只看本队建筑：悬停敌方信号源时不该切成对方的编码口径（本队没有该编码就显示自动）
+        if (b != null && Vars.player != null && b.team != Vars.player.team()) b = null;
+        return codeOf(b);
+    }
+
+    /** 建筑携带的编码：信号源=自身编码；中继=绑定编码；卫星控制台=所选编码；其余（含检测器）→ null */
+    public static String codeOf(Building b) {
+        if (b instanceof SignalSourceBuild sb) {
+            return sb.signal == null ? null : sb.signal.name;
+        }
+        if (b instanceof SignalRelayBuild rb) {
+            return (rb.selectedSource == null || rb.selectedSource.isEmpty()) ? null : rb.selectedSource;
+        }
+        if (b instanceof silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild cb) {
+            return cb.selectedSignal;
+        }
+        return null;
+    }
+
+    /** 每格最大有效信号（**与频谱面板同一实现**：SignalChannel.usableAll，逐信道地面 SINR ⊕ 同编码卫星 RSS）。
+     *  返回该格最强信道的可用度、贡献来源建筑与归属编码——因此 H 上的数字必然等于频谱里最高的那一行。
+     *  <p>viewCode 非 null 时只算该编码（悬停/配置面板打开的建筑）；为 null 时自动：逐信道取该信道地面最强编码，
+     *  该信道没有地面信号才取该信道最强卫星编码，绝不跨编码求和。</p> */
+    static float bestSignal(Team team, float wx, float wy, Building[] bestSrcOut, String[] bestCodeOut, String viewCode) {
+        SignalChannel.usableAll(team, wx, wy, effBuf, srcBuf, null, codeBuf, viewCode);
+        float best = 0f;
         Building bestSrc = null;
+        String bestCode = null;
         for (int ch = 1; ch <= SignalJammer.CHANNEL_MAX; ch++) {
-            if (effBuf[ch] > bestStr) {
-                bestStr = effBuf[ch];
+            if (effBuf[ch] > best) {
+                best = effBuf[ch];
                 bestSrc = srcBuf[ch];
+                bestCode = codeBuf[ch];
             }
-        }
-        float groundStr = bestStr; // 地面层合成前强度（RSS 合成保留双方功率，着色归属按贡献较大方）
-        // 卫星层：覆盖该格的在轨卫星各自按信噪比折算有效强度（底噪在质量因子内）、对数叠加；
-        // 记录最强贡献者的编码用于着色。
-        // 上行门控：有编码的卫星在其地面源全部消失后停止广播（未绑定记录无编码语义，仍提供原始覆盖）
-        float satSum = 0f, satBest = 0f;
-        String satTop = null;
-        for (SatelliteManager.SatelliteRecord r : SatelliteManager.satellites(team)) {
-            if (r.code != null && !SignalChannel.hasLiveSource(team, r.code)) continue;
-            float e = SatelliteManager.satelliteEffAt(r, wx, wy);
-            if (e <= 0f) continue;
-            satSum += e;
-            if (e > satBest) {
-                satBest = e;
-                satTop = r.code;
-            }
-        }
-        float satStr = Math.max(0f, SatelliteManager.stackEff(satSum, satBest));
-        // 卫星×地面 RSS 功率合成：total = √(g² + s²)——同信道功率相加，卫星对已有地面覆盖的
-        // 区域仍是真实增益（抗干扰裕度实质提升），不再是"地面弱时的替补"。
-        // 着色归属保持贡献较大的一方：地面=建筑专属色，卫星=编码色（未绑定蓝渐变）
-        bestStr = (float) Math.sqrt((double) groundStr * groundStr + (double) satStr * satStr);
-        if (satStr > groundStr) {
-            bestSrc = null; // 卫星层贡献占优
-            bestCodeOut[0] = satTop; // 最强贡献卫星的编码（未绑定记录为 null → 蓝渐变）
-        } else {
-            bestCodeOut[0] = null; // 地面层占优（或全零）：编码出参清空
         }
         bestSrcOut[0] = bestSrc;
-        return bestStr;
+        // 卫星层主导（或无地面信号）时用编码色；编码为 null（未绑定卫星）时绘制端走蓝色渐变
+        bestCodeOut[0] = bestSrc == null ? bestCode : null;
+        return best;
+    }
+
+    /** 本帧"可能有信号"的包围盒（本队源 / 已激活中继 / 在轨卫星覆盖圆的并集）——逐格绘制前的廉价裁剪。
+     *  干扰器只会压制、不会产生信号，所以不参与包围盒。 */
+    private static final Rect coverBounds = new Rect();
+
+    static void computeCoverBounds(Team team) {
+        float r = SignalSource.RADIUS * 8f;
+        float minx = Float.MAX_VALUE, miny = Float.MAX_VALUE, maxx = -Float.MAX_VALUE, maxy = -Float.MAX_VALUE;
+        for (SignalSourceBuild sb : SignalSource.allSources(team)) {
+            if (sb.signal == null) continue;
+            minx = Math.min(minx, sb.x - r);
+            miny = Math.min(miny, sb.y - r);
+            maxx = Math.max(maxx, sb.x + r);
+            maxy = Math.max(maxy, sb.y + r);
+        }
+        for (SignalRelayBuild rb : SignalRelay.allRelays(team)) {
+            if (!rb.active) continue;
+            minx = Math.min(minx, rb.x - r);
+            miny = Math.min(miny, rb.y - r);
+            maxx = Math.max(maxx, rb.x + r);
+            maxy = Math.max(maxy, rb.y + r);
+        }
+        for (SatelliteManager.SatelliteRecord rec : SatelliteManager.satellites(team)) {
+            Unit u = Groups.unit.getByID(rec.unitId);
+            if (u == null) continue;
+            float cr = SatelliteManager.coverageRadius(rec.orbit);
+            minx = Math.min(minx, u.x - cr);
+            miny = Math.min(miny, u.y - cr);
+            maxx = Math.max(maxx, u.x + cr);
+            maxy = Math.max(maxy, u.y + cr);
+        }
+        if (minx > maxx) {
+            coverBounds.set(0f, 0f, 0f, 0f); // 本队没有任何发射机：整帧跳过
+        } else {
+            coverBounds.set(minx, miny, maxx - minx, maxy - miny);
+        }
     }
 
     /** 数字模式：可见区域内逐格取各信道最大有效信号，每格只绘制一次（字号覆盖一格 8px）；颜色取最强来源的专属色 */
-    static void drawNumbersOverlay(Team team, float alpha) {
+    static void drawNumbersOverlay(Team team, float alpha, String viewCode) {
         Rect view = Core.camera.bounds(Tmp.r1);
         int x0 = (int) (view.x / 8f) - 1, x1 = (int) ((view.x + view.width) / 8f) + 1;
         int y0 = (int) (view.y / 8f) - 1, y1 = (int) ((view.y + view.height) / 8f) + 1;
@@ -357,12 +421,17 @@ public class SignalOverlay {
         Building[] bestSrc = bestSrcTmp;
         String[] bestCode = bestCodeTmp;
         try {
-            // 单字符居中偏移：相对原 0.2 字号的 1/1.6，按当前字号比例缩放
+            // 格子中心：tile 索引 gx 覆盖世界坐标 [gx*8, gx*8+8)，中心即 +4 —— 采样与绘字都用它。
+            // 横向用 arc 的 Align.center（与绘制同一套布局代码，1/2 位数都精确居中，不依赖度量猜测）；
+            // 纵向沿用原基准字号调好的 -1.6 偏移（按字号倍率 k 缩放）
+            float cell = 8f, half = cell / 2f;
             float k = scale / 0.2f;
+            computeCoverBounds(team); // 本帧覆盖包围盒：盒外格子直接跳过，避免每格跑完整 SINR 批算
             for (int gx = x0; gx <= x1; gx++) {
                 for (int gy = y0; gy <= y1; gy++) {
-                    float wx = gx * 8f, wy = gy * 8f; // 格子中心（像素）
-                    float s = bestSignal(team, wx, wy, bestSrc, bestCode);
+                    float wx = gx * cell + half, wy = gy * cell + half; // 格子中心（像素）
+                    if (!coverBounds.contains(wx, wy)) continue;
+                    float s = bestSignal(team, wx, wy, bestSrc, bestCode, viewCode);
                     if (s <= 0f) continue;
                     int val = Mathf.round(s);
                     float t = s / SignalSource.MAX_STRENGTH;
@@ -373,9 +442,10 @@ public class SignalOverlay {
                         satelliteColor(bestCode[0], t, Tmp.c1);
                     }
                     Tmp.c1.a((0.6f + 0.4f * t) * digitAlpha * alpha);
-                    // 复用预计算字符串避免分配；居中偏移随字号缩放
+                    // 复用预计算字符串避免分配
+                    String num = NUMBER_STRINGS[Mathf.clamp(val, 0, SignalSource.MAX_STRENGTH)];
                     Fonts.def.setColor(Tmp.c1);
-                    Fonts.def.draw(NUMBER_STRINGS[val < 0 ? 0 : (val > 15 ? 15 : val)], wx - 1f * k, wy - 1.6f * k);
+                    Fonts.def.draw(num, wx, wy - 1.6f * k, Align.center);
                 }
             }
         } finally {
@@ -385,11 +455,11 @@ public class SignalOverlay {
         }
     }
 
-    /** 范围模式（逐格合成）：每格取各信道最大有效信号，与卫星层（对数叠加扣底噪）取 max，用最强来源的
-     *  专属颜色绘制（重叠/干扰区显示最强或空白）。卫星信号与地面信号源共用同一透明度公式
-     *  (0.45+0.35t)·rangeAlpha·alpha 与同一强度标度（t = 强度/MAX_STRENGTH），每格只绘制一次——
-     *  卫星覆盖透明度与信号源完全一致 */
-    static void drawRangeComposite(Team team, float alpha) {
+    /** 范围模式（逐格合成）：每格按"当前查看的编码"聚合地面与卫星（卫星层为非相干功率合成 √(Σeᵢ²)，
+     *  与地面 RSS 合成 total = √(g² + s²)），用最强来源的专属颜色绘制（重叠/干扰区显示最强或空白）。
+     *  卫星信号与地面信号源共用同一透明度公式 (0.45+0.35t)·rangeAlpha·alpha 与同一强度标度
+     *  （t = 强度/MAX_STRENGTH），每格只绘制一次——卫星覆盖透明度与信号源完全一致 */
+    static void drawRangeComposite(Team team, float alpha, String viewCode) {
         Rect view = Core.camera.bounds(Tmp.r1);
         float rpx = SignalSource.RADIUS * 8f;
         // 格子范围：视口外扩一个覆盖半径（源在视口外但覆盖进入视口）
@@ -399,10 +469,13 @@ public class SignalOverlay {
         float rangeAlpha = Core.settings.getInt("signal.rangeAlpha", 45) / 100f;
         Building[] bestSrc = bestSrcTmp;
         String[] bestCode = bestCodeTmp;
+        computeCoverBounds(team); // 盒外格子直接跳过
         for (int gx = x0; gx <= x1; gx++) {
             for (int gy = y0; gy <= y1; gy++) {
-                float wx = gx * 8f, wy = gy * 8f; // 格子中心（像素）
-                float s = bestSignal(team, wx, wy, bestSrc, bestCode);
+                // 格子中心（+4）：Fill.rect 以中心为锚，采样点也取中心，格子与世界格网对齐
+                float wx = gx * 8f + 4f, wy = gy * 8f + 4f;
+                if (!coverBounds.contains(wx, wy)) continue;
+                float s = bestSignal(team, wx, wy, bestSrc, bestCode, viewCode);
                 if (s <= 0f) continue;
                 float t = s / SignalSource.MAX_STRENGTH;
                 // 最强来源的专属颜色（仅卫星时为最强贡献卫星的编码色，未绑定浅蓝），不透明度随强度

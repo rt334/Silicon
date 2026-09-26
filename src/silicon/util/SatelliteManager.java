@@ -9,7 +9,6 @@ import arc.math.Mathf;
 import arc.struct.ObjectIntMap;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
-import arc.util.Time;
 import mindustry.content.Fx;
 import mindustry.entities.Effect;
 import mindustry.game.Gamemode;
@@ -82,13 +81,14 @@ public class SatelliteManager {
     /** 状态广播字段分隔符（编码：teamId|sigC|testC|名册|readyC|readyType|producingType；
      *  名册条目 "unitId:code:channel:orbit:phaseBits"，条目间 ';'，空名册为空字段） */
     static final String SEP = "|";
-    /** 每星信号强度（覆盖圆内、未被压制时的原始强度；多星对数叠加后扣底噪）——轨道越高覆盖越大、强度越低：
-     *  LEO 1.5 / MEO 1.3 / GEO 1.1（首颗扣底噪后 1.0/0.8/0.6，均足以激活中继器转发），SSO 特例 1.5（小覆盖强信号） */
+    /** 每星信号强度（覆盖圆内、未被压制时的原始强度；多星按非相干功率合成 √(Σeᵢ²) 叠加）——轨道越高覆盖越大、强度越低：
+     *  LEO 9.9 / MEO 8.58 / GEO 7.26 = 旧 15 标度值 ×6.6（与地面同一 0~99 标度；单星净空有效值 7.9/5.5/3.5，
+     *  均超过转发阈值 3.3），SSO 特例 9.9（小覆盖强信号） */
     public static float satelliteStrength(int orbit) {
         switch (orbit) {
-            case SatelliteConsole.ORBIT_MEO: return 1.3f;
-            case SatelliteConsole.ORBIT_GEO: return 1.1f;
-            default: return 1.5f; // LEO 与 SSO
+            case SatelliteConsole.ORBIT_MEO: return 8.58f;
+            case SatelliteConsole.ORBIT_GEO: return 7.26f;
+            default: return 9.9f; // LEO 与 SSO
         }
     }
 
@@ -145,12 +145,38 @@ public class SatelliteManager {
         producingTypeMirror.clear();
     }
 
-    /** 世界加载完成后对账（WorldLoadEvent + app.post 延迟一拍 + 控制器节流兜底）：
-     *  给"有实体无名册"的卫星补建未绑定记录（名册丢失兜底，如旧版本存档），然后向在场队伍广播镜像。
-     *  注意：不剪除"无实体"的名册记录——存档两侧 unitId 均保留、击落由 UnitDestroyEvent 除名、
-     *  跨局由 ResetEvent 清空；且存档读入时 WorldLoadEvent 早于单位读入（units 在 entities 区域），
-     *  此刻按 getByID 剪除只会误杀刚从控制台恢复的名册（卫星冻结+无信号的读档 bug） */
+    /** 世界加载完成后对账（WorldLoadEvent + app.post 延迟一拍 + 控制器节流兜底）。
+     *  <p>WorldLoadEvent 那次**不能剪除**记录：存档读入顺序是 map → entities，该事件在 map 结束时
+     *  就触发，此刻单位实体还没读入，按 getByID 剪除会误杀刚从控制台恢复的名册（卫星冻结+无信号的
+     *  读档 bug）。真正生效的对账走 {@code Core.app.post(() -> onWorldLoaded(true))}——那一拍 entities
+     *  区域已读完，可以安全剪除死记录。 */
     public static void onWorldLoaded() {
+        onWorldLoaded(false);
+    }
+
+    /**
+     * @param pruneDead true 时剪除「名册有记录、但实体已不存在」的行。
+     *                  只能在单位读入完成后调用（见 {@link #onWorldLoaded()}），否则会误杀。
+     *                  实体被击落的正常路径由 {@link #onUnitDestroyed} 除名；这里是兜底：
+     *                  存档 entity id 重复被引擎重新分配（SaveVersion.java:503-514）等异常情况下，
+     *                  旧记录会永久残留并使 launchedCount 虚高。
+     */
+    public static void onWorldLoaded(boolean pruneDead) {
+        // 只在权威端剪除：客机名册是广播镜像（applyState 每次整表替换，本就会清掉死行），
+        // 而客机的单位是随后才陆续同步到的——抢在实体到位前剪除只会让覆盖显示短暂空窗。
+        if (pruneDead && isAuthority()) {
+            // 先快照键再改表（ObjectMap.keys() 是视图，迭代中 remove 不安全）
+            Seq<Team> owners = new Seq<>();
+            satRecords.each((t, l) -> owners.add(t));
+            for (Team t : owners) {
+                Seq<SatelliteRecord> list = satRecords.get(t);
+                if (list == null) continue;
+                for (int i = list.size - 1; i >= 0; i--) {
+                    if (Groups.unit.getByID(list.get(i).unitId) == null) list.remove(i);
+                }
+                if (list.isEmpty()) satRecords.remove(t);
+            }
+        }
         for (Unit u : Groups.unit) {
             if (u.controller() instanceof OrbitSatelliteController && recordOf(u.id) == null) {
                 SatelliteRecord r = new SatelliteRecord();
@@ -163,9 +189,9 @@ public class SatelliteManager {
                 if (r.orbit == SatelliteConsole.ORBIT_GEO) {
                     r.phase = Mathf.atan2(u.y - cy, u.x - cx) / Mathf.PI2;
                 } else if (r.orbit == SatelliteConsole.ORBIT_SSO) {
-                    r.phase = u.y / Vars.world.unitHeight() - Time.time / orbitPeriod(r.orbit);
+                    r.phase = u.y / Vars.world.unitHeight();
                 } else {
-                    r.phase = u.x / Vars.world.unitWidth() - Time.time / orbitPeriod(r.orbit);
+                    r.phase = u.x / Vars.world.unitWidth();
                 }
                 satRecords.get(u.team, Seq::new).add(r);
             }
@@ -297,10 +323,12 @@ public class SatelliteManager {
     /** 轨迹边缘内缩（px）：卫星扫过全部图幅但不越界 */
     public static final float SCAN_MARGIN = 8f;
 
-    /** 扫描进度 u：phase + Time.time/周期，1.0 = 沿主轴横穿全图一圈（回绕）；
-     *  位置/保存/发射初始化共用的唯一时间换算入口（读档 Time.time 归零后从存档 u 无缝续接） */
+    /** 扫描进度 u（1.0 = 沿主轴横穿全图一圈（回绕）；GEO 定点不使用本值）：
+     *  相位是**自累加**的存档字段（{@link OrbitSatelliteController} 每帧 += delta/周期），
+     *  所以位置是「存档值的纯函数」——与 Time.time 这类全局时钟无关，任何读档/重启都精确续接。
+     *  位置/保存/发射初始化共用的唯一入口。 */
     public static float scanU(SatelliteRecord r) {
-        return r.phase + Time.time / orbitPeriod(r.orbit);
+        return r.phase;
     }
 
     /** 指定轨道与进度 u 的星下点 X：LEO/MEO = 经度回绕（东西向匀速），SSO = 正弦摆动（极轨） */
@@ -339,14 +367,17 @@ public class SatelliteManager {
         return scanYAt(r.orbit, scanU(r));
     }
 
-    /** 保存用相位：GEO 存定点方位角（与时间无关），其余存当前扫描进度 u（读档从该进度续接，卫星不跳位） */
+    /** 保存用相位：GEO = 定点方位角，其余 = 当前扫描进度 u。两者都直接取 phase——
+     *  相位本身就是累加器，「存档值 = 当前位置」，读档不需要任何时间换算。
+     *  （旧档里存的是线性叠加了 Time.time 的旧语义 u，读入后会按新语义当作进度继续推进，
+     *  位置依旧连续，只是与旧档保存瞬间的位置不同——一次性差异，之后完全确定。） */
     public static float phaseForSave(SatelliteRecord r) {
-        return r.orbit == SatelliteConsole.ORBIT_GEO ? r.phase : scanU(r);
+        return r.phase;
     }
 
     // —— 卫星信号语义（覆盖/强度/干扰）——
 
-    /** 单条记录在 (wx,wy) 处的有效强度（SINR 比值制）：星下点覆盖圆内原始强度（LEO 1.5 / MEO 1.3 / GEO 1.1 / SSO 1.5）
+    /** 单条记录在 (wx,wy) 处的有效强度（SINR 比值制）：星下点覆盖圆内原始强度（LEO 9.9 / MEO 8.58 / GEO 7.26 / SSO 9.9）
      *  × 质量因子——SINR = raw / (底噪 + 其固化信道干扰)，SINR ≤ 1（功率压不过噪声+干扰）即无信号；
      *  信道未固化（-1，发射时编码无地面源）则不受信道干扰——"在轨广播"的物理化。
      *  供绑定判定（>0）、覆盖绘制聚合与叠星共用 */
@@ -365,21 +396,33 @@ public class SatelliteManager {
         return satelliteStrength(r.orbit);
     }
 
-    /** 对数叠加：最强一星全额计入，其余星合并贡献 ln(1+Σ其余)——叠星仍有收益但边际递减；
-     *  单星时 rest=0 → ln(1)=0，语义与线性时代完全一致（首星激活阈值不变） */
-    public static float stackEff(float sumEff, float maxEff) {
-        float rest = sumEff - maxEff;
-        if (rest <= 0f) return maxEff;
-        return maxEff + (float)Math.log(1.0 + rest);
+    /**
+     * 多星叠加（非相干功率合成）：{@code total = √(Σ eᵢ²)}。
+     * <p>选它的三个理由：
+     * <ol>
+     *   <li><b>与层间合成同一运算</b>——"卫星 × 地面"本来就是 {@code √(g² + s²)}，叠星用同一函数后
+     *       整个模型可结合：把 N 颗卫星与地面源一起丢进同一个 √(Σ·²) 与"先叠星再叠地面"结果完全相同；</li>
+     *   <li><b>物理正确</b>：多颗卫星是彼此独立的非相干发射源，功率（幅值平方）相加、幅值按平方根合成，
+     *       不像线性叠加那样把 N 颗当成一个 N 倍功率的发射机，也不像对数叠加那样在强项上再做非线性压缩；</li>
+     *   <li><b>尺度自洽</b>：N 颗同强度卫星 = {@code e·√N}（数量翻 4 倍强度才翻倍），单星语义完全不变
+     *       （首星激活阈值不变），抗干扰裕度随 √N 单调增长且永不"白送"。</li>
+     * </ol>
+     * 对比同样 10 颗 LEO（单星有效 1.2）：RSS = 3.79；旧对数叠星 = 3.67（形状相近但小 N 时偏高）；
+     * 线性叠加 = 12.0（明显失真）。
+     *
+     * @param sumSquares Σ eᵢ²（各星有效强度的平方和）
+     */
+    public static float stackEff(float sumSquares) {
+        return (float) Math.sqrt(Math.max(0f, sumSquares));
     }
 
     /**
      * 指定编码的卫星信号在 (wx,wy) 处的有效强度（SINR 比值制）：覆盖该点且编码匹配的卫星
-     * 各自按信噪比折算有效强度（{@link #satelliteEffAt}），再对数叠加（最强一星全额，其余合并
-     * 贡献 ln(1+Σ其余)）——底噪已在每星质量因子内，不再末尾扣减。
+     * 各自按信噪比折算有效强度（{@link #satelliteEffAt}），再按非相干功率合成
+     * {@link #stackEff  √(Σ eᵢ²)}——底噪已在每星质量因子内，不再末尾扣减。
      * 干扰压制语义：该编码功率 ≤ 底噪+同信道干扰（SINR ≤ 1）即无信号；随 SINR 升至 3.5 达满质量。
-     * 净空单星有效强度：LEO 1.2 / MEO 0.83 / GEO 0.53，均超过中继器激活阈值（>0.5），
-     * 单星即可让覆盖圆内的中继器转发；叠星按对数提升抗干扰裕度（边际递减）。
+     * 净空单星有效强度：LEO 7.92 / MEO 5.49 / GEO 3.48，均超过中继器激活阈值（>3.3），
+     * 单星即可让覆盖圆内的中继器转发；叠星按 √N 提升抗干扰裕度。
      * code 必须 non-null（中继器按编码判定；全量聚合在绘制层内联，共用 {@link #stackEff}）。
      */
     public static float satelliteStrengthAt(Team team, String code, float wx, float wy) {
@@ -387,15 +430,81 @@ public class SatelliteManager {
         // 上行门控：该编码的存活地面源全部消失 → 卫星停止广播（删源即断链：绑定该编码的
         // 中继器随之去活，覆盖绘制同步消失；重放同编码源自动恢复）。名册与编码固化不动。
         if (!silicon.world.blocks.signal.SignalChannel.hasLiveSource(team, code)) return 0f;
-        float sum = 0f, max = 0f;
+        float sumSq = 0f;
         for (SatelliteRecord r : satellites(team)) {
             if (r.code == null || !code.equals(r.code)) continue;
             float e = satelliteEffAt(r, wx, wy);
             if (e <= 0f) continue;
-            sum += e;
-            if (e > max) max = e;
+            sumSq += e * e;
         }
-        return Math.max(0f, stackEff(sum, max));
+        return stackEff(sumSq);
+    }
+
+    // —— 覆盖显示用的「按编码分组取最强」缓冲（静态复用，避免每格分配）——
+    private static final Seq<String> satGroupCodes = new Seq<>();
+    private static final Seq<float[]> satGroupAcc = new Seq<>();
+    private static int satGroupCount = 0;
+
+    /**
+     * (wx,wy) 处有效强度最高的**单个编码**（仅供覆盖显示：格子上的数字必须等于某个编码真实可用的强度，
+     * 不能是跨编码求和）。
+     * <ul>
+     *   <li>逐编码分组：同编码按非相干功率合成 {@link #stackEff √(Σeᵢ²)}，取各组最大值；</li>
+     *   <li>判定/绑定仍走 {@link #satelliteStrengthAt}（中继、控制台按自己绑定的编码）；</li>
+     *   <li>未绑定记录（code == null，读档名册丢失的兜底）作为独立一组参与，出参编码为 null，
+     *       绘制端据此走蓝色渐变；</li>
+     *   <li>上行门控与逐编码一致：编码无存活地面源时该组不计入。</li>
+     * </ul>
+     *
+     * @param codeOut 出参（可为 null）：最强组的编码（null = 未绑定组）；无覆盖时不被写入
+     * @return 最强组的叠加强度（无覆盖为 0）
+     */
+    public static float bestSatelliteAt(Team team, float wx, float wy, String[] codeOut) {
+        return bestSatelliteAt(team, wx, wy, codeOut, -1);
+    }
+
+    /**
+     * 同上，可限定信道（{@code channelFilter >= 1} 时只统计固化信道等于该值的卫星；-1 = 不限）。
+     * 频谱面板"无编码视图"（检测器）逐信道取最强编码时用它。
+     */
+    public static float bestSatelliteAt(Team team, float wx, float wy, String[] codeOut, int channelFilter) {
+        satGroupCodes.clear();
+        satGroupCount = 0;
+        for (SatelliteRecord r : satellites(team)) {
+            if (channelFilter >= 1 && r.channel != channelFilter) continue;
+            if (r.code != null && !silicon.world.blocks.signal.SignalChannel.hasLiveSource(team, r.code)) continue;
+            float e = satelliteEffAt(r, wx, wy);
+            if (e <= 0f) continue;
+            int idx = -1;
+            for (int i = 0; i < satGroupCount; i++) {
+                String c = satGroupCodes.get(i);
+                if (c == null ? r.code == null : c.equals(r.code)) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                idx = satGroupCount++;
+                if (idx < satGroupCodes.size) {
+                    satGroupCodes.set(idx, r.code);
+                } else {
+                    satGroupCodes.add(r.code);
+                }
+                while (satGroupAcc.size <= idx) satGroupAcc.add(new float[1]);
+                satGroupAcc.get(idx)[0] = 0f;
+            }
+            float[] acc = satGroupAcc.get(idx);
+            acc[0] += e * e; // 非相干功率合成：累加平方
+        }
+        float best = 0f;
+        for (int i = 0; i < satGroupCount; i++) {
+            float v = stackEff(satGroupAcc.get(i)[0]);
+            if (v > best) {
+                best = v;
+                if (codeOut != null) codeOut[0] = satGroupCodes.get(i);
+            }
+        }
+        return best;
     }
 
     /** 某队伍待发射卫星数（客机读广播镜像，权威端读登记列表） */
@@ -580,11 +689,6 @@ public class SatelliteManager {
         rec.code = signalName;
         rec.channel = resolveChannel(team, signalName);
         rec.orbit = orbit;
-        UnitType ut = SatelliteUnits.typeFor(orbit);
-        Unit unit = ut.create(team);
-        unit.set(launcher.x, launcher.y);
-        unit.add();
-        rec.unitId = unit.id;
         // 初始相位：取星下点轨迹上距中枢最近的点作为出生点（与发射特效衔接）；
         // GEO 定点于中枢方位角（距图心 0.05 短半轴的定点环，多颗自然散开）
         float cx = Vars.world.unitWidth() / 2f, cy = Vars.world.unitHeight() / 2f;
@@ -600,8 +704,14 @@ public class SatelliteManager {
                     best = u;
                 }
             }
-            rec.phase = best - Time.time / orbitPeriod(orbit);
+            rec.phase = best;
         }
+        // 出生点直接落在轨道点上（相位此刻已确定）：否则出生那一帧卫星会停在发射中枢方块上
+        UnitType ut = SatelliteUnits.typeFor(orbit);
+        Unit unit = ut.create(team);
+        unit.set(scanX(rec), scanY(rec));
+        unit.add();
+        rec.unitId = unit.id;
         satRecords.get(team, Seq::new).add(rec);
         // 发射特效（在发射中枢位置，全图广播）：原版火箭发射喷发 + 原版发射舱升空 + 原版大范围
         // 冲击环（launchAccelerator 160px / launch 120px——launchPod 的细条纹会被光柱淹没，用大环保证

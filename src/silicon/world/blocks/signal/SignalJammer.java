@@ -17,8 +17,10 @@ import mindustry.world.meta.Stat;
 
 /**
  * 信号干扰器（1×1）：在指定信道（1~5，或全信道 ALL）发射压制噪声。
- * 干扰强度与信号强度同模型（中心 15，随距离高斯衰减）；某处信号强度减去干扰强度，
- * 差值 ≤ 0 时该处信号被完全压制（H 覆盖中无信号）。
+ * 干扰强度与信号强度同模型（中心 15，随距离高斯衰减），按 SINR 比值制进入信噪比分母：
+ * 干扰抬高 I（底噪 + 同信道 CCI + 邻信道 ACIR + 干扰器功率），目标信号质量因子随之下降；
+ * SINR ≤ 1（功率压不过底噪+干扰）时该处无信号（H 覆盖中不显示）。
+ * 多台干扰器在同一信道的功率**叠加**（{@link SignalChannel#jammerAt}），单台不再各算各的最大值。
  */
 public class SignalJammer extends Block {
     /** 全信道模式值 */
@@ -68,17 +70,12 @@ public class SignalJammer extends Block {
         return jammerList;
     }
 
-    /** 位置 (wx,wy) 处的同信道（或全信道）干扰强度（0~15，与信号强度同模型衰减；关闭的干扰器不干扰）。
-     *  不分队伍：敌方干扰器同样压制我方该信道信号（H 覆盖中敌方干扰区不再显示我方信号）。 */
+    /** 位置 (wx,wy) 处、指定信道受到的干扰总和（0~99 量级；同信道 + 邻信道泄漏，多台干扰器叠加；
+     *  关闭的干扰器不干扰；不分队伍——敌方干扰器同样压制我方该信道信号）。
+     *  实现委托 {@link SignalChannel#jammerAt}：与地面层（effectiveAll）**同一算法**，
+     *  避免卫星层取最强、地面层求和的旧口径分叉。 */
     public static float strengthAt(int channel, float wx, float wy) {
-        float best = 0f;
-        for (SignalJammerBuild jb : allJammers()) {
-            if (!jb.enabled) continue; // 关闭（enabled=false）不发射干扰
-            if (jb.jamChannel != ALL && jb.jamChannel != channel) continue;
-            float s = SignalSource.strengthAt(jb.x, jb.y, wx, wy);
-            if (s > best) best = s;
-        }
-        return best;
+        return SignalChannel.jammerAt(channel, wx, wy);
     }
 
     public class SignalJammerBuild extends Building {
@@ -150,7 +147,8 @@ public class SignalJammer extends Block {
         @Override
         public void read(Reads read, byte revision) {
             super.read(read, revision);
-            jamChannel = read.i();
+            // 越界值会让该干扰器永远匹配不到任何信道（静默失效）——读档时夹取到合法范围
+            jamChannel = Mathf.clamp(read.i(), ALL, CHANNEL_MAX);
         }
     }
 }

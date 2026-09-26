@@ -74,6 +74,8 @@ public class Silicon extends Mod {
 
     /** 卫星状态周期广播计时（约 30 tick / 0.5s） */
     private static int satelliteBroadcastTick = 0;
+    /** sat-launch 速率限制（tick）：同一控制台两次请求的最小间隔，挡客户端重放刷扫描 */
+    public static final float LAUNCH_REQUEST_COOLDOWN = 30f;
 
     public Silicon() {
         Events.on(EventType.ClientLoadEvent.class, e -> {
@@ -112,7 +114,9 @@ public class Silicon extends Mod {
             // 名册↔卫星实体对账：存档读入时 WorldLoadEvent 早于单位读入（readMap→endMapLoad→readEntities），
             // 此刻 Groups.unit 还没有卫星，这里的调用只覆盖"实体先于事件"的路径（如直接进新图）
             SatelliteManager.onWorldLoaded();
-            Core.app.post(SatelliteManager::onWorldLoaded); // 存档读档真正生效的对账：entities 区域已读完
+            // 存档读档真正生效的对账：entities 区域已读完（WorldLoadEvent 早于单位读入），
+            // 因此这一拍可以顺带剪除「名册有记录但实体不存在」的死行
+            Core.app.post(() -> SatelliteManager.onWorldLoaded(true));
             SignalOverlay.reset(); // 清颜色缓存/色相分配/显示状态，防跨世界累积
         });
         // 卫星实体被击落（伤害仅可能来自 scripted unit.damage()）→ 名册除名并广播
@@ -175,6 +179,14 @@ public class Silicon extends Mod {
                         Call.clientPacketReliable(p.con, "sat-result", "disabled");
                         return;
                     }
+                    // 速率限制：每个请求都会做一遍"信号范围 + 1:1 配对"扫描（O(建筑×源)），
+                    // 改造客户端可高频重放刷 CPU；这里按控制台 0.5s 限流（合法双击本来也会因 produced
+                    // 已清空而失败，限流只挡重放，不影响正常操作）
+                    if (Time.time - cb.lastLaunchRequest < LAUNCH_REQUEST_COOLDOWN) {
+                        Call.clientPacketReliable(p.con, "sat-result", "fail");
+                        return;
+                    }
+                    cb.lastLaunchRequest = Time.time;
                     int orbit;
                     try {
                         orbit = Integer.parseInt(parts[2].trim());
@@ -379,6 +391,11 @@ public class Silicon extends Mod {
                 } catch (NumberFormatException ignored) {
                 }
             }));
+
+            // 暂停请求的确认回包（服务器 → 请求者）：不置 complete 的话，客户端会每 60 秒
+            // 重发一次 "pause"（见下方 Trigger.update 的重试分支），且 pauseMode=0 时服务器不回包。
+            // 注意：本回调在 PR #50 同步上游时被误删过，勿再删。
+            netClient.addPacketHandler("paused", s -> Vars.pause.complete = true);
         });
 
         Events.run(EventType.Trigger.update, () -> {

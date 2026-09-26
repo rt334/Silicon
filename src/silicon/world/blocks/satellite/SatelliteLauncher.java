@@ -224,6 +224,9 @@ public class SatelliteLauncher extends Block {
             }
             // 关闭（enabled=false，逻辑门/开关控制）：不充电、不生产（进度与已生产状态保留）
             if (!enabled) return;
+            // 客机不做本地生产/充电：材料、进度、缓冲电全部以服务器快照（applySnapshot）为准，
+            // 否则快照到达前会本地扣料、推进进度，与主机短暂分叉
+            if (!silicon.util.SatelliteManager.isAuthority()) return;
             // 电网有电时向发射缓冲充电（发射储备）
             if (power != null && power.status > 0.001f && battery < LAUNCH_POWER) {
                 battery = Math.min(LAUNCH_POWER, battery + CHARGE_RATE * delta());
