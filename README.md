@@ -6,7 +6,7 @@
 >
 > 使用硅，解决以上问题！——锐意更新中
 
-一个添加了个人创意的 Mindustry 模组（`v160.1+`），提供多种实用方块与便捷功能。
+一个添加了个人创意的 Mindustry 模组（`v160.5+`），提供多种实用方块与便捷功能。
 
 <!-- FORK-BUILD:BEGIN -->
 > **最新构建**（自动维护，请勿手改本区块）：分支 `fork/main` · 提交 `7fc27d2` · 2026-09-26 13:01 UTC · [下载 jar](https://github.com/rt334/Silicon/releases/tag/fork-latest)
@@ -78,7 +78,7 @@
 
 ## 构建与固化验证
 
-依赖 Mindustry `v160.1` 的 jar 与 **JDK 17**（Android 端 d8 需要）：
+依赖 Mindustry `v160.5` 的 jar 与 **JDK 17**（Android 端 d8 需要）：
 
 ```powershell
 # 一条龙：30 项代码锚点检查 → 编译 deploy → 自动同步游戏模组目录
@@ -115,6 +115,7 @@ powershell -ExecutionPolicy Bypass -File scripts\hub-deep-check.ps1
 - 移除弃用「卫星在轨」状态效果（发射/上线施加点与双语言 bundle 键同步清理）
 - 预留：卫星血量 400，仅脚本化伤害可击落（ASAT 拦截在后续阶段）
 - 测试卫星沙盒专属：非沙盒模式不出现（中枢隐藏选项且不生产、发射请求被权威端拒绝并提示）
+- **适配 Mindustry v160.5**：`build.gradle` 依赖版本由 `v160.1` 提升至 `v160.5`（Steam 客户端现为 `steam build 160.5`）；纯上游代码**零源码改动**编译通过，且产出 jar 与 v160.1 构建**逐字节相同**（同为 684,521 B / sha256 `2D93084E…`，说明 160.2~160.5 未触及本模组用到的 API）；v160.2~v160.5 的发布内容均为缺陷修复与 UI 调整（target dummy、逻辑处理器、数据补丁、连锁闪电等），无破坏性变更
 ### a0.12.4.4
 - **适配 Mindustry v160.1**：`build.gradle` 依赖版本由 `v159.7` 提升至 `v160.1`，纯上游代码零源码改动编译通过（含 `--rerun-tasks` 全量重编译）；v160.1 客户端实测模组加载、内容注册、设置加载均正常
 - 向后兼容：v160.1 构建在 159.7 上同样正常加载，`minGameVersion` 维持 `155.4`
