@@ -22,7 +22,6 @@ import silicon.world.blocks.sandbox.MessageTest;
 import silicon.world.blocks.signal.DimensionAnchor;
 import silicon.world.blocks.signal.SignalDetector;
 import silicon.world.blocks.signal.SignalJammer;
-import silicon.world.blocks.signal.SignalProbe;
 import silicon.world.blocks.signal.SignalRelay;
 import silicon.world.blocks.signal.SignalSource;
 
@@ -32,7 +31,7 @@ public class Blocks {
     public static Block powerGeneratorPump, dualPurposeJunction, dualPurposeStorager,
             rollGenerator, powerProtector, powerSource, mineConverter, theSwitch, itemTransferHub,
             dimensionAnchor, signalSource, universalJunction, signalRelay, signalJammer,
-            satelliteLauncher, satelliteConsole, messageTest, signalDetector, signalProbe;
+            satelliteLauncher, satelliteConsole, messageTest, signalDetector;
 
     public static void load() {
         powerGeneratorPump = new GeneratorPump("power-generator-pump") {{
@@ -174,13 +173,6 @@ public class Blocks {
             size = 1;
             health = 60;
         }};
-        // 单格信号探针（调试方块，仅沙盒可见）：覆盖率压到 0.5 格 → 全图只有它自己那一格显示 H 数字，
-        // 用来核对数字与格子中心的对齐（与 messageTest 一样属于长期保留的调试方块）
-        signalProbe = new SignalProbe("signal-probe") {{
-            requirements(Category.effect, BuildVisibility.sandboxOnly, with());
-            alwaysUnlocked = true;
-            size = 1;
-            health = 60;
-        }};
+
     }
 }
