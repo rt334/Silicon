@@ -111,6 +111,8 @@ public class Silicon extends Mod {
         Events.on(EventType.WorldLoadEvent.class, e -> {
             SignalSource.markDirty();
             SignalRelay.markDirty();
+            // 诊断：世界加载探针（不依赖是否已发射卫星）——用来区分"世界没加载"与"加载了但没有卫星"
+            silicon.util.LoicWeapon.diagWorldLoaded();
             // 名册↔卫星实体对账：存档读入时 WorldLoadEvent 早于单位读入（readMap→endMapLoad→readEntities），
             // 此刻 Groups.unit 还没有卫星，这里的调用只覆盖"实体先于事件"的路径（如直接进新图）
             SatelliteManager.onWorldLoaded();
@@ -138,6 +140,7 @@ public class Silicon extends Mod {
         MineConverter.initNetworking();
         ItemTransferHub.initNetworking();
         SignalOverlay.init();
+        silicon.util.SatelliteTrajectory.init(); // 悬停卫星时预览 ±100 秒轨迹（挂 Trigger.drawOver，与信号覆盖同层）
         // 消息系统多人联网同步（nop 当不在服务器上时，仅注册事件处理器）
         MessageSync.init();
 
@@ -229,6 +232,40 @@ public class Silicon extends Mod {
                     }
                 }
             });
+
+            // 离子炮开关请求（客机 → 服务器）：只传控制台坐标、目标 unitId 与期望的两个开关值。
+            // 校验与 sat-launch 同级：坐标→控制台存在→队伍匹配→enabled，另加"该 unitId 确实是本队的
+            // 离子炮卫星"（否则等于让任意客户端改别人卫星的武器状态）。权威端写入后回执最终状态。
+            netServer.addPacketHandler("sat-loic", (p, data) -> {
+                try {
+                    String[] parts = data.split("\\|", -1);
+                    if (parts.length != 4) return;
+                    String[] xy = parts[0].split(",");
+                    if (xy.length != 2) return;
+                    mindustry.world.Tile tile = world.tile(
+                            Integer.parseInt(xy[0].trim()), Integer.parseInt(xy[1].trim()));
+                    if (tile == null || !(tile.build instanceof silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild)) {
+                        return;
+                    }
+                    silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild cb =
+                            (silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild) tile.build;
+                    if (cb.team != p.team() || !cb.enabled) return;
+                    int unitId = Integer.parseInt(parts[1].trim());
+                    mindustry.gen.Unit su = mindustry.gen.Groups.unit.getByID(unitId);
+                    if (su == null || su.team != p.team()) return;
+                    silicon.util.SatelliteManager.SatelliteRecord rec = silicon.util.SatelliteManager.recordOf(unitId);
+                    if (rec == null || rec.type != silicon.world.blocks.satellite.SatelliteLauncher.TYPE_ION) return;
+
+                    silicon.util.LoicWeapon.State st = silicon.util.LoicWeapon.state(unitId);
+                    st.autoFire = Integer.parseInt(parts[2].trim()) != 0;
+                    st.attackSats = Integer.parseInt(parts[3].trim()) != 0;
+                    Call.clientPacketReliable(p.con, "sat-loic-result",
+                            unitId + "|" + (st.autoFire ? 1 : 0) + "|" + (st.attackSats ? 1 : 0));
+                } catch (Exception ex) {
+                    SiliconLog.info("sat-loic: handler error: " + ex);
+                }
+            });
+
         }
 
         // 多人暂停的服务端包处理器：必须注册在 init()——dedicated 服务器只触发 ServerLoadEvent、
@@ -336,6 +373,8 @@ public class Silicon extends Mod {
                 // —— 物流中枢 ——
                 addSection(st, "setting.silicon.group.hub");
                 st.checkPref("hubDebugLog", false, v -> silicon.world.blocks.distribution.ItemTransferHub.debugFlows = v);
+                // LOIC 开火链路诊断：打开后每颗卫星每 60 tick 输出一行状态（武器更新/索敌/校验/开火四个阶段）
+                st.checkPref("loicDebugLog", true, v -> silicon.util.LoicWeapon.debug = v);
                 st.sliderPref("hubLinkOpacity", 100, 0, 100, 5, i -> i + "%");
 
                 // —— 界面 ——
@@ -365,10 +404,23 @@ public class Silicon extends Mod {
             // 启动时从持久化设置恢复调试开关（checkPref 的变更回调只在用户手动切换时触发，
             // 不初始化的话每次启动都要重新关闭再打开才生效）
             silicon.world.blocks.distribution.ItemTransferHub.debugFlows = Core.settings.getBool("hubDebugLog", false);
+            silicon.util.LoicWeapon.debug = Core.settings.getBool("loicDebugLog", true);
 
             // 卫星状态广播（服务器 → 客机）：应用主机权威状态（在轨数/归属信号/待发射数镜像）。
             // 包处理器在网络线程回调——一切状态/UI 操作必须 post 回主线程
             netClient.addPacketHandler("sat-state", s -> Core.app.post(() -> SatelliteManager.applyState(s)));
+            // 离子炮开关回执（服务器 → 请求者）：用权威值覆盖客机的乐观更新
+            netClient.addPacketHandler("sat-loic-result", s -> Core.app.post(() -> {
+                try {
+                    String[] f = s.split("\\|", -1);
+                    if (f.length != 3) return;
+                    silicon.world.blocks.satellite.SatelliteConsole.applyLoicState(
+                            Integer.parseInt(f[0].trim()),
+                            Integer.parseInt(f[1].trim()),
+                            Integer.parseInt(f[2].trim()));
+                } catch (NumberFormatException ignoredBadResult) {
+                }
+            }));
             // 发射失败反馈（服务器 → 请求者）
             netClient.addPacketHandler("sat-result", s -> Core.app.post(() -> {
                 if (s.equals("disabled")) {
@@ -397,7 +449,6 @@ public class Silicon extends Mod {
                         case SatelliteManager.LAUNCH_NO_HUB: key = "block.silicon-satellite-console.nohub"; break;
                         case SatelliteManager.LAUNCH_MULTI_HUB: key = "block.silicon-satellite-console.multihub"; break;
                         case SatelliteManager.LAUNCH_MULTI_CONSOLE: key = "block.silicon-satellite-console.multiconsole"; break;
-                        case SatelliteManager.LAUNCH_TEST_SANDBOX: key = "block.silicon-satellite-console.sandboxOnly"; break;
                         default: key = "block.silicon-satellite-console.fail"; break;
                     }
                     ui.showInfoToast(Core.bundle.get(key), 3f);

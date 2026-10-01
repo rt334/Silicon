@@ -54,6 +54,28 @@ import silicon.util.SatelliteManager;
  */
 public class SatelliteUnits {
     public static UnitType signalLeo, signalMeo, signalGeo, testSso;
+    /** 近地轨道离子炮（LOIC）专用机型：唯一挂武器的卫星，只在 LEO 使用 */
+    public static UnitType ionLeo;
+    /**
+     * 靶标卫星：**唯一的可被攻击卫星**，供 LOIC 与反卫星拦截塔验证整条攻击链路。
+     * <p>
+     * 它同样走 {@link OrbitSatelliteController}，因此天然满足所有攻击侧的索敌条件：
+     * <ul>
+     *   <li>LOIC 的 {@code isLowOrbitSatellite()} 只认控制器类型与轨道，本机型取 LEO，可被索敌；</li>
+     *   <li>卫星定位器按控制器类型全图探测，因此它也会被探测、被拦截塔锁定；</li>
+     *   <li>血量 1000（见 {@link #TARGET_HEALTH}）：高于普通卫星的 400，被离子炮一发击落。</li>
+     * </ul>
+     * <b>无需任何生成逻辑</b>：直接放置/刷出即可。缺名册的轨道卫星会被
+     * {@code SatelliteManager.onWorldLoaded()} 的补建路径自动登记（控制器每 60 帧兜底触发一次），
+     * 登记后即按 LEO 轨迹运动。
+     */
+    public static UnitType targetSatellite;
+
+    /**
+     * 靶标卫星血量：1000 —— LOIC 单发 2000，因此**一发即碎**，符合"靶子"的直觉；
+     * 但仍高于普通卫星的 400（普通卫星被 ASAT 拦截塔两发击落，靶标需要略耐打一点才看得出命中）。
+     */
+    public static final float TARGET_HEALTH = 1000f;
 
     public static void load() {
         // 名字不带 mod 前缀：MappableContent 构造时会经 content.transformName 无条件加 "silicon-" 前缀
@@ -61,11 +83,115 @@ public class SatelliteUnits {
         signalLeo = orbitSatellite("satellite-leo", SatelliteConsole.ORBIT_LEO);
         signalMeo = orbitSatellite("satellite-meo", SatelliteConsole.ORBIT_MEO);
         signalGeo = orbitSatellite("satellite-geo", SatelliteConsole.ORBIT_GEO);
+        // SSO（太阳同步/极轨）机型：轨道保留不动，机型也不改名。
+        // 测试卫星**类型**已删除（不再可生产/发射），但 SSO 轨道与它的载体机型按原样保留。
         testSso = orbitSatellite("satellite-sso", SatelliteConsole.ORBIT_SSO);
+        // 离子炮走**单位武器**：冷却、索敌、瞄准、开火与联机同步全部由引擎的 Weapon 处理，
+        // 不需要另维护冷却表或自定义网络包（引擎的单位武器会自带建筑谓词，见 Weapon.findTarget）
+        //
+        // 但武器更新本身有个前提（核过源码，改这里之前先看）：
+        //   WeaponsComp.update()（每单位每帧）→ mount.weapon.update(self(), mount)
+        //   → Weapon.update() 里 `boolean can = unit.canShoot();`，而 can=false 时它是**整体 return**的
+        //   → UnitComp.canShoot() = !disarmed && !(type.canBoost && isFlying())
+        // 卫星是 flying=true 的单位，本行机型全都没设 canBoost（默认 false），所以 can 恒为 true、武器会更新，
+        // LoicWeapon 的弹药恢复也在其中。**不要让卫星类型变成 canBoost**，也不要依赖「用状态效果停火」——
+        // 那两件事都会让 can=false，武器更新被整个跳过（表现为弹药永不恢复、也不再开火）。
+        // 需要停火请走控制台的「自动」开关（它只影响 LoicWeapon.shoot，不碰引擎这层）。
+        ionLeo = orbitSatellite("satellite-loic", SatelliteConsole.ORBIT_LEO);
+        ionLeo.weapons.add(ionWeapon());
+
+        // 靶标卫星：放在 LEO（LOIC 的作战轨道），血量为普通卫星的 75 倍。
+        // 注意不能设 hidden=true——沙盒单位面板与地图编辑器都用 !isHidden() 过滤，
+        // 隐藏了就再也刷不出来，靶子也就没有意义了。
+        targetSatellite = orbitSatellite("satellite-target", SatelliteConsole.ORBIT_LEO);
+        targetSatellite.health = TARGET_HEALTH;
     }
 
-    /** 按轨道取机型 */
-    public static UnitType typeFor(int orbit) {
+    /**
+     * 离子炮武器：**1 秒连射**、**5 发弹夹**、每 30 秒回 1 发；对地打建筑，也可打**低轨卫星**。
+     * <p>
+     * 索敌、弹药与两个开关（自动发射 / 攻击卫星）都在 {@link silicon.util.LoicWeapon} 里：
+     * 引擎的武器没有"弹夹"概念（`reload` 只是开火间隔），所以那里用一张按 unitId 的状态表补上，
+     * 并**重写** `findTarget` —— 不能在 `super.findTarget` 之后过滤，否则最近的若恰好是卫星且
+     * "攻击卫星"关闭，会连更远的建筑一起漏掉。
+     */
+    /** 单次打击的中心伤害（溅射边缘由引擎按距离衰减） */
+    public static final float ION_DAMAGE = 2000f;
+    /** 溅射半径（格） */
+    public static final float ION_RADIUS_TILES = 10f;
+    /**
+     * 武器索敌射程（格）。
+     * <p>
+     * 必须走 {@code rangeOverride}（见 {@link #ionWeapon()} 里的说明），直接赋 {@code range}
+     * 会被引擎的 {@code calculateRange()} 覆盖成 {@code speed × lifetime}（135 格）。
+     * <p>
+     * 取 80 格：与反卫星拦截塔射程一致，形成"地面能打多远、天上就能打多远"的对称；
+     * 悬停卫星时会画出这个范围（见 {@code SatelliteTrajectory}），便于判断能不能够到目标。
+     */
+    public static final float ION_RANGE_TILES = 80f;
+    /** 开火间隔（tick）：1 秒 */
+    public static final float ION_COOLDOWN_TICKS = 60f;
+    /** 弹夹容量 */
+    public static final float ION_MAGAZINE = 5f;
+    /** 每恢复 1 发所需时间（tick）：30 秒 */
+    public static final float ION_RECHARGE_TICKS = 30f * 60f;
+
+    static silicon.util.LoicWeapon ionWeapon() {
+        mindustry.entities.bullet.BulletType shot = new mindustry.entities.bullet.BulletType() {{
+            damage = ION_DAMAGE;
+            splashDamage = ION_DAMAGE;
+            splashDamageRadius = ION_RADIUS_TILES * 8f;
+            collidesGround = true;   // 打地面目标（建筑）
+            collidesAir = true;      // 也要能打低轨卫星（引擎的单位索敌靠 isFlying 放行）
+            collidesTiles = true;
+            speed = 12f;             // 从轨道砸下：够快，但保留可见的坠落过程
+            lifetime = 90f;
+            // ★ 索敌射程必须用 rangeOverride，**不能**直接赋给 range：
+            //   BulletType.init()（引擎 BulletType.java:854）与 afterPatch()（:402）都会
+            //   无条件执行 `range = calculateRange()`，把直接赋给 range 的值覆盖掉；
+            //   而 calculateRange() 的第一行就是 `if(rangeOverride > 0) return rangeOverride`。
+            //   实测踩过：设 range = 320 之后，诊断日志里索敌射程仍是 speed×lifetime = 1080
+            //   （135 格），于是 LOIC 会在半个地图外锁定目标 —— 表现为"异常锁定"。
+            //   原版单位同样走这个入口（UnitTypes.java 里的 rangeOverride = 385f 等）。
+            rangeOverride = ION_RANGE_TILES * 8f;
+            // 四段表现：发射闪光、飞行尾迹、命中爆炸、未命中/寿命结束的爆裂。
+            shootEffect = mindustry.content.Fx.shootBig2;
+            smokeEffect = mindustry.content.Fx.shootBigSmoke2;
+            trailEffect = mindustry.content.Fx.artilleryTrail;
+            trailInterval = 2f;
+            hitEffect = mindustry.content.Fx.massiveExplosion;
+            despawnEffect = mindustry.content.Fx.blastExplosion;
+        }};
+        return new silicon.util.LoicWeapon("silicon-ion-cannon") {{
+            reload = ION_COOLDOWN_TICKS;
+            maxAmmo = ION_MAGAZINE;
+            rechargeTicks = ION_RECHARGE_TICKS;
+            bullet = shot;
+            rotate = false;    // 不需要转向表现（伤害直接落在目标上）
+            mirror = false;
+            shootCone = 360f;  // 不限制射界：目标可能在任意方向
+            x = 0f;
+            y = 0f;
+            // ★ 这两行是"能不能索敌"的总开关，缺一不可（引擎源码 Weapon.java:59/65/318）：
+            //     controllable 默认 true → `!controllable` 为 false
+            //     autoTarget   默认 false
+            //   而索敌分支是 `if(!controllable && autoTarget){ mount.target = findTarget(...) }`，
+            //   两个条件都不满足时 findTarget() 永不调用，mount.target 恒为 null，永远不开火。
+            //   卫星用的是自定义 OrbitSatelliteController（不是 AIController），
+            //   因此 AIController.updateWeapons() 那条备选路径也不会跑——必须让武器自己索敌。
+            controllable = false;
+            autoTarget = true;
+        }};
+    }
+
+    /**
+     * 按轨道与种类取机型。
+     * <p>
+     * 离子炮卫星必须有独立机型：机型是**按轨道共享**的（信号卫星共用同一批），
+     * 把武器加在通用机型上会让所有 LEO 卫星都变成炮。
+     */
+    public static UnitType typeFor(int orbit, int type) {
+        if (type == silicon.world.blocks.satellite.SatelliteLauncher.TYPE_ION) return ionLeo;
         switch (orbit) {
             case SatelliteConsole.ORBIT_MEO: return signalMeo;
             case SatelliteConsole.ORBIT_GEO: return signalGeo;
@@ -154,8 +280,11 @@ public class SatelliteUnits {
             @Override
             public void loadIcon() {
                 super.loadIcon();
-                // 原版 loadIcon 会把无 sprite 机型的图标指到 error 白方块——统一替换为程序化图标
-                uiIcon = fullIcon = satelliteIcon();
+                // 有正式贴图时保留 atlas 图标；只有缺图时才使用程序化图标。
+                // 旧实现无条件覆盖 uiIcon/fullIcon，导致右下角信息区永远显示同一枚程序化图标。
+                if (region == null || !region.found()) {
+                    uiIcon = fullIcon = satelliteIcon();
+                }
             }
 
             @Override
@@ -166,16 +295,37 @@ public class SatelliteUnits {
                 // 无贴图兜底：程序化卫星造型（队色环+核心+太阳能板线）；
                 // 交付 sprites/units/<机型名>.png 后自动切换为贴图绘制（load() 里的兜底负责命名兼容）
                 if (!region.found()) {
+                    // 无贴图兜底造型本身就是队色绘制（队色环 + 核心），不需要再叠外置标记
                     drawFallback(unit, p);
                 } else {
                     Draw.color(1f, 1f, 1f, p);
                     Draw.rect(region, unit.x, unit.y, unit.rotation - 90f);
                     Draw.color();
-                    // 贴图本身不含队伍信息：中心补一个队色点，多队同图时仍能分辨归属
-                    Draw.color(unit.team.color, p);
-                    Fill.circle(unit.x, unit.y, 1.6f);
-                    Draw.reset();
+                    // 贴图不含队伍信息：补一圈**外置**队伍标记（画在贴图之外，不遮挡本体）
+                    drawTeamMarker(unit, p);
                 }
+            }
+
+            /**
+             * 队伍标识：**必须画在卫星贴图之外**。
+             * <p>
+             * 卫星贴图是 32×32（半径约 16px），早先这里用 r=5.2 的环 + 中心实心圆，
+             * 等于直接在卫星本体中心盖了一层，把贴图挡得看不清。
+             * 现在环与四向标记都取 17.5px 以上，只围绕卫星外缘，不覆盖任何贴图像素。
+             */
+            void drawTeamMarker(Unit unit, float alpha) {
+                Color tc = unit.team.color;
+                float r = 17.5f;
+                Draw.color(tc, alpha * 0.9f);
+                Lines.stroke(1.4f);
+                Lines.circle(unit.x, unit.y, r);
+                // 四向短标记：全部位于环外，进一步强化远距离的队伍辨识
+                Lines.line(unit.x - r - 3f, unit.y, unit.x - r - 0.5f, unit.y);
+                Lines.line(unit.x + r + 0.5f, unit.y, unit.x + r + 3f, unit.y);
+                Lines.line(unit.x, unit.y - r - 3f, unit.x, unit.y - r - 0.5f);
+                Lines.line(unit.x, unit.y + r + 0.5f, unit.x, unit.y + r + 3f);
+                Lines.stroke(1f);
+                Draw.reset();
             }
 
             void drawFallback(Unit unit, float alpha) {
@@ -188,10 +338,7 @@ public class SatelliteUnits {
                 // 本体环：tc 是 Team.color 的**共享实例**，直接 a(alpha) 会把全队队色改淡且不恢复——必须 cpy
                 Lines.stroke(1.5f, tc.cpy().a(alpha));
                 Lines.circle(unit.x, unit.y, r);
-                // 核心 + 遥测闪烁
-                Draw.color(tc, alpha);
-                Fill.circle(unit.x, unit.y, r * 0.45f);
-                Fill.circle(unit.x, unit.y, r * 0.2f + (float) Math.abs(Mathf.sin(unit.id + Time.time / 40f)) * r * 0.15f);
+                // 中心徽记由 drawTeamMarker() 统一绘制，避免正式贴图与回退绘制的队伍标识不一致。
                 // 复位笔画宽度（Draw.reset 只复位颜色,Lines.stroke 是独立静态值,残留会影响后续 Lines 绘制）
                 Lines.stroke(1f);
                 Draw.reset();

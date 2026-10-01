@@ -63,8 +63,6 @@ public class SatelliteManager {
     public static final int LAUNCH_MULTI_HUB = 6;
     /** 所选信号范围内存在多个卫星控制台 */
     public static final int LAUNCH_MULTI_CONSOLE = 7;
-    /** 测试卫星仅在沙盒模式可用（非沙盒模式发射测试卫星被拒） */
-    public static final int LAUNCH_TEST_SANDBOX = 8;
 
     /**
      * 在轨卫星名册（按队伍）——权威端维护真值，客机经 sat-state 广播镜像。
@@ -82,7 +80,7 @@ public class SatelliteManager {
     private static final ObjectIntMap<Team> readyTypeMirror = new ObjectIntMap<>();
     private static final ObjectIntMap<Team> producingTypeMirror = new ObjectIntMap<>();
     /** 状态广播字段分隔符（编码：teamId|sigC|testC|名册|readyC|readyType|producingType；
-     *  名册条目 "unitId:code:channel:orbit:phaseBits"，条目间 ';'，空名册为空字段） */
+     *  名册条目 "unitId:code:channel:orbit:type:phaseBits"，条目间 ';'，空名册为空字段） */
     static final String SEP = "|";
     /** 每星信号强度（覆盖圆内、未被压制时的原始强度；多星按非相干功率合成 √(Σeᵢ²) 叠加）——轨道越高覆盖越大、强度越低：
      *  LEO 9.9 / MEO 8.58 / GEO 7.26 = 旧 15 标度值 ×6.6（与地面同一 0~99 标度；单星净空有效值 7.9/5.5/3.5，
@@ -105,6 +103,9 @@ public class SatelliteManager {
         public int channel = -1;
         /** 发射轨道（SatelliteConsole.ORBIT_*），决定覆盖半径与轨道周期 */
         public int orbit;
+        /** 卫星类型（SatelliteLauncher.TYPE_SIGNAL / TYPE_ION）：发射时由中枢的所选种类固化。
+         *  与轨道**正交**，所以必须单独存——此前只能用"轨道==SSO"近似判断种类，会算错。 */
+        public int type = SatelliteLauncher.TYPE_SIGNAL;
         /** 轨道相位（rad，世界时间 0 时刻的轨道角）——保存时推进到当前时刻，读档续接不跳位 */
         public float phase;
     }
@@ -114,7 +115,12 @@ public class SatelliteManager {
         return Vars.net.server() || !Vars.net.active();
     }
 
-    /** 测试卫星是否可用：仅沙盒模式（Gamemode.sandbox）——其他模式不出现（UI 隐藏 + 生产/发射权威拦截） */
+    /**
+     * 沙盒自测放宽判据（仅沙盒模式）——反卫星拦截塔、卫星定位器与 LOIC 用它放行"己方"目标，
+     * 以便单机沙盒里验证整条攻击/探测链路（沙盒没有第二个队，只打敌方则无法自测）。
+     * <p>
+     * 原名与"测试卫星"绑定；测试卫星类型已删除，本方法保留（改名会牵动多处调用，且语义仍是沙盒放宽）。
+     */
     public static boolean testSatelliteAvailable() {
         return Vars.state != null && Vars.state.rules != null && Vars.state.rules.mode() == Gamemode.sandbox;
     }
@@ -146,6 +152,8 @@ public class SatelliteManager {
         readyMirror.clear();
         readyTypeMirror.clear();
         producingTypeMirror.clear();
+        SatelliteIntel.clear(); // 定位情报同样按世界生命周期清理（换图/读档后旧坐标无意义）
+        LoicWeapon.clear();     // 离子炮弹药与开关同理：读档后弹药回满、开关回默认
     }
 
     /** 世界加载完成后对账（WorldLoadEvent + app.post 延迟一拍 + 控制器节流兜底）。
@@ -196,6 +204,8 @@ public class SatelliteManager {
                     r.code = null; // 未绑定：仅提供覆盖强度，不参与编码绑定
                     r.channel = -1;
                     r.orbit = ((OrbitSatelliteController) u.controller()).orbit;
+                    // 名册缺失时从实体机型恢复类型：控制器只保存 orbit，LOIC 的独立 UnitType 才是唯一可靠线索。
+                    r.type = typeForUnit(u);
                     float cx = Vars.world.unitWidth() / 2f, cy = Vars.world.unitHeight() / 2f;
                     // 从当前位置近似续接轨迹：主轴对齐（EW=经度，SSO=纬度，GEO=定点方位角）
                     if (r.orbit == SatelliteConsole.ORBIT_GEO) {
@@ -238,6 +248,14 @@ public class SatelliteManager {
             Seq<SatelliteRecord> list = satRecords.get(team);
             SatelliteRecord r = list.find(x -> x.unitId == unit.id);
             if (r != null) {
+                // 所有击落来源统一从 UnitDestroyEvent 进入这里，避免只在某个攻击器的 shoot() 里播报而漏报。
+                if (isAuthority()) {
+                    String name = unit.type == null ? "Satellite" : unit.type.localizedName;
+                    MessageSystem.instance.post(MessageSystem.info(
+                            Core.bundle.get("satellite.destroyed.title"),
+                            Core.bundle.format("satellite.destroyed", name), 8f));
+                    Call.sendMessage(Core.bundle.format("satellite.destroyed", name));
+                }
                 list.remove(r);
                 if (list.isEmpty()) satRecords.remove(team);
                 broadcastState(team);
@@ -250,13 +268,13 @@ public class SatelliteManager {
         return satellites(team).size;
     }
 
-    /** 某队伍指定种类在轨卫星数（协议兼容近似字段：按轨道近似判定，测试卫星可发任意轨道故非精确；
+    /** 某队伍指定种类在轨卫星数（协议兼容字段；
      *  客机 applyState 不消费此字段，仅用于广播串格式占位） */
     public static int launchedCount(Team team, int type) {
         int n = 0;
-        boolean wantTest = type == SatelliteLauncher.TYPE_TEST;
+        // 按名册里固化的真实类型计数（此前用"轨道==SSO"近似，故不准）
         for (SatelliteRecord r : satellites(team)) {
-            if ((r.orbit == SatelliteConsole.ORBIT_SSO) == wantTest) n++;
+            if (r.type == type) n++;
         }
         return n;
     }
@@ -276,12 +294,21 @@ public class SatelliteManager {
         return null;
     }
 
+    /** 根据卫星实体机型恢复类型；名册缺失时用于读档对账。 */
+    static int typeForUnit(Unit unit) {
+        if (unit != null && unit.type == silicon.content.SatelliteUnits.ionLeo) {
+            return SatelliteLauncher.TYPE_ION;
+        }
+        // testSso 机型（SSO 轨道载体）不再对应任何可生产类型：按信号卫星归属
+        return SatelliteLauncher.TYPE_SIGNAL;
+    }
+
     /**
-     * 恢复一条名册记录（SatelliteConsole 存档块 v2 读入时调用；权威端与客机都用它引导）。
+     * 恢复一条名册记录（SatelliteConsole 存档块 v3 读入时调用；权威端与客机都用它引导）。
      * 按 unitId 去重：多台控制台写同一份全局快照，读档时先到先得、并集合并。
      * 实体对账在 onWorldLoaded 统一进行。
      */
-    public static void restoreRecord(Team team, int unitId, int channel, int orbit, String code, float phase) {
+    public static void restoreRecord(Team team, int unitId, int channel, int orbit, String code, float phase, int type) {
         if (recordOf(unitId) != null) return;
         SatelliteRecord r = new SatelliteRecord();
         r.unitId = unitId;
@@ -293,6 +320,9 @@ public class SatelliteManager {
         r.code = c;
         r.channel = (channel == -1) ? -1 : Mathf.clamp(channel, 1, SignalJammer.CHANNEL_MAX);
         r.orbit = (orbit >= 0 && orbit < SatelliteConsole.ORBIT_COUNT) ? orbit : SatelliteConsole.ORBIT_LEO;
+        // 类型**按有效性夹取**：只有信号卫星与离子炮是合法类型。旧存档里可能残留编号 1
+        //（已删除的测试卫星）或越界值，一律归为信号卫星，避免在轨列表/武器判定/轨道允许性跟着错。
+        r.type = SatelliteLauncher.isValidType(type) ? type : SatelliteLauncher.TYPE_SIGNAL;
         r.phase = (Float.isFinite(phase)) ? phase - (float) Math.floor(phase) : 0f;
         satRecords.get(team, Seq::new).add(r);
     }
@@ -438,10 +468,18 @@ public class SatelliteManager {
     }
 
     /** 单条记录在 (wx,wy) 处的原始强度（未折算干扰）：覆盖圆内为该轨道定值 × 存在度，圆外 0
-     *  （存在度见 {@link #presence}：回绕进出场时强度同步淡出，避免"瞬移"与"图没了信号还在"） */
+     *  （存在度见 {@link #presence}：回绕进出场时强度同步淡出，避免"瞬移"与"图没了信号还在"）
+     *  <p>
+     *  <b>LOIC 不提供信号覆盖</b>：它是武器卫星，不参与通信。这里直接返回 0，于是覆盖绘制、
+     *  强度聚合、中继器激活与绑定判定全部随之失效 —— 本方法是所有覆盖计算的唯一入口，
+     *  在这一处收口即可保证"看不到覆盖圈"与"真的没有覆盖"始终一致。 */
     public static float satelliteRawAt(SatelliteRecord r, float wx, float wy) {
         Unit u = Groups.unit.getByID(r.unitId);
         if (u == null) return 0f;
+        // 双保险：名册 type 与实体机型任一判定为 LOIC 即视为武器卫星。
+        // 只看名册 type 不够——旧存档残留值、补建时序都可能让它不准，
+        // 而机型是引擎里唯一可靠的线索（LOIC 有独立 UnitType）。
+        if (r.type == SatelliteLauncher.TYPE_ION || u.type == SatelliteUnits.ionLeo) return 0f;
         if (!u.within(wx, wy, coverageRadius(r.orbit))) return 0f;
         return satelliteStrength(r.orbit) * presence(r.orbit, scanU(r));
     }
@@ -577,26 +615,27 @@ public class SatelliteManager {
         broadcastState(launcher.team);
     }
 
-    /** 某队伍待发射第一颗卫星种类（信号/测试；-1=无）——客机读镜像，权威端读登记列表 */
+    /** 某队伍待发射第一颗卫星种类（按生产锁定类型；-1=无）——客机读镜像，权威端读登记列表 */
     public static int readyType(Team team) {
         if (!isAuthority()) return readyTypeMirror.get(team, -1);
         Seq<SatelliteLauncher.SatelliteLauncherBuild> list = readyLaunchers.get(team);
-        return list == null || list.isEmpty() ? -1 : list.get(0).selectedType;
+        return list == null || list.isEmpty() ? -1 : list.get(0).lockedType;
     }
 
-    /** 某队伍正在制造的卫星种类（-1=无）——客机读镜像，权威端扫描中枢生产状态 */
+    /** 某队伍正在制造的卫星种类（按生产锁定类型；-1=无）——客机读镜像，权威端扫描中枢生产状态 */
     public static int producingType(Team team) {
         if (!isAuthority()) return producingTypeMirror.get(team, -1);
         for (Building b : Groups.build) {
             if (b instanceof SatelliteLauncher.SatelliteLauncherBuild lb
                     && lb.team == team && !lb.produced && lb.progress > 0f) {
-                return lb.selectedType;
+                return lb.lockedType;
             }
         }
         return -1;
     }
 
-    /** 编码某队状态为广播串（teamId|sigC|testC|名册|readyC|readyType|producingType） */
+    /** 编码某队状态为广播串（teamId|sigC|testC|名册|readyC|readyType|producingType；
+     *  名册条目 = unitId:code:channel:orbit:type:phase） */
     static String encodeState(Team team) {
         StringBuilder roster = new StringBuilder();
         for (SatelliteRecord r : satellites(team)) {
@@ -605,10 +644,10 @@ public class SatelliteManager {
                     .append(r.code == null ? "" : r.code).append(':')
                     .append(r.channel).append(':')
                     .append(r.orbit).append(':')
+                    .append(r.type).append(':')
                     .append(Float.floatToIntBits(r.phase));
         }
         return team.id + SEP + launchedCount(team, SatelliteLauncher.TYPE_SIGNAL) + SEP
-                + launchedCount(team, SatelliteLauncher.TYPE_TEST) + SEP
                 + roster + SEP
                 + readyCount(team) + SEP + readyType(team) + SEP + producingType(team);
     }
@@ -640,27 +679,28 @@ public class SatelliteManager {
     /** 客户端应用主机广播的某队卫星状态（镜像；不修改权威端数据） */
     public static void applyState(String data) {
         String[] parts = data.split("\\" + SEP, -1);
-        if (parts.length != 7) return;
+        if (parts.length != 6) return;
         try {
             Team team = Team.get(Integer.parseInt(parts[0]));
             Seq<SatelliteRecord> list = satRecords.get(team, Seq::new);
             list.clear();
-            if (!parts[3].isEmpty()) {
-                for (String entry : parts[3].split(";")) {
+            if (!parts[2].isEmpty()) {
+                for (String entry : parts[2].split(";")) {
                     String[] f = entry.split(":", -1);
-                    if (f.length != 5) continue;
+                    if (f.length != 6) continue; // unitId:code:channel:orbit:type:phase
                     SatelliteRecord r = new SatelliteRecord();
                     r.unitId = Integer.parseInt(f[0]);
                     r.code = f[1].isEmpty() ? null : f[1];
                     r.channel = Integer.parseInt(f[2]);
                     r.orbit = Integer.parseInt(f[3]);
-                    r.phase = Float.intBitsToFloat(Integer.parseInt(f[4]));
+                    r.type = Integer.parseInt(f[4]);
+                    r.phase = Float.intBitsToFloat(Integer.parseInt(f[5]));
                     list.add(r);
                 }
             }
-            readyMirror.put(team, Integer.parseInt(parts[4]));
-            readyTypeMirror.put(team, Integer.parseInt(parts[5]));
-            producingTypeMirror.put(team, Integer.parseInt(parts[6]));
+            readyMirror.put(team, Integer.parseInt(parts[3]));
+            readyTypeMirror.put(team, Integer.parseInt(parts[4]));
+            producingTypeMirror.put(team, Integer.parseInt(parts[5]));
         } catch (NumberFormatException ignored) {
         }
     }
@@ -720,9 +760,9 @@ public class SatelliteManager {
         if (hubs.size > 1) return LAUNCH_MULTI_HUB;
         if (consolesInSignal(team, signalName) > 1) return LAUNCH_MULTI_CONSOLE;
         SatelliteLauncher.SatelliteLauncherBuild launcher = hubs.first();
-        int type = launcher.selectedType;
-        // 测试卫星沙盒专属：非沙盒模式拒发（中枢配置可被跨存档/原理图带入，UI 隐藏不够，权威端兜底）
-        if (type == SatelliteLauncher.TYPE_TEST && !testSatelliteAvailable()) return LAUNCH_TEST_SANDBOX;
+        // 用**生产时锁定的类型**，而不是当前选择：否则玩家能用 A 的配方生产完、切到 B 再发射。
+        // 锁定发生在首次扣材料那一刻（见 SatelliteLauncherBuild.updateTile），切换选择器只影响下一颗。
+        int type = launcher.lockedType;
         if (!SatelliteConsole.orbitAllowed(type, orbit)) return LAUNCH_ORBIT_FORBIDDEN;
         if (!launcher.produced) return LAUNCH_NO_READY;
         int fuel = SatelliteConsole.fuelFor(orbit);
@@ -739,6 +779,7 @@ public class SatelliteManager {
         rec.code = signalName;
         rec.channel = resolveChannel(team, signalName);
         rec.orbit = orbit;
+        rec.type = type; // 类型来自中枢的所选种类（与轨道正交，必须随名册一起持久化与广播）
         // 初始相位：取星下点轨迹上距中枢最近的点作为出生点（与发射特效衔接）；
         // GEO 定点于中枢方位角（距图心 0.05 短半轴的定点环，多颗自然散开）
         float cx = Vars.world.unitWidth() / 2f, cy = Vars.world.unitHeight() / 2f;
@@ -756,8 +797,9 @@ public class SatelliteManager {
             }
             rec.phase = best;
         }
-        // 出生点直接落在轨道点上（相位此刻已确定）：否则出生那一帧卫星会停在发射中枢方块上
-        UnitType ut = SatelliteUnits.typeFor(orbit);
+        // 出生点直接落在轨道点上（相位此刻已确定）：否则出生那一帧卫星会停在发射中枢方块上。
+        // 机型按「轨道 + 种类」选：离子炮卫星有独立机型（唯一挂武器的），不能与信号卫星共用。
+        UnitType ut = SatelliteUnits.typeFor(orbit, type);
         Unit unit = ut.create(team);
         unit.set(scanX(rec), scanY(rec));
         unit.add();
@@ -781,7 +823,7 @@ public class SatelliteManager {
         String teamName = Core.bundle.get("team." + team.name + ".name", team.name);
         String typeKey;
         switch (type) {
-            case SatelliteLauncher.TYPE_TEST: typeKey = "block.silicon-satellite-console.type.short.test"; break;
+            case SatelliteLauncher.TYPE_ION: typeKey = "block.silicon-satellite-console.type.short.ion"; break;
             default: typeKey = "block.silicon-satellite-console.type.short.signal"; break;
         }
         Call.sendMessage(Core.bundle.format("satellite.launch.message", teamName,

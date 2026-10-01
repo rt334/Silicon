@@ -13,17 +13,21 @@ import arc.util.io.Writes;
 import mindustry.Vars;
 import mindustry.gen.Building;
 import mindustry.gen.Call;
+import mindustry.gen.Groups;
 import mindustry.ui.Styles;
 import mindustry.ui.dialogs.BaseDialog;
 import mindustry.world.Block;
+import silicon.content.SatelliteUnits;
+import silicon.util.LoicWeapon;
 import silicon.util.SatelliteManager;
 import silicon.world.blocks.signal.SignalChannel;
 import silicon.world.blocks.signal.SignalSource;
 
 /**
- * 卫星控制台（3×3）：卫星的发射终端，仅提供发射操作。
+ * 卫星控制台（3×3）：卫星的发射与在轨管理终端。
  * 不存储燃料与电力——燃料（石油）与缓冲电力（10000）均由卫星发射中枢提供；
- * 卫星种类由卫星发射中枢选择。点击方块弹出界面选择轨道与信号后发射。
+ * 卫星种类由卫星发射中枢选择。点击方块弹出界面，分两个页签：
+ * 「发射」选信号与轨道后发射；「在轨管理」列出本队名册（编码/轨道/信道/门控与覆盖/进度，可定位）。
  * 轨道影响中枢燃油需求（LEO 1000 / MEO 2500 / GEO 5000 / SSO 8000）；
  * 信号卫星仅可发射到 LEO/MEO/GEO；SSO 供信号卫星以外的卫星类型使用（轨道划分不同卫星的功能）。
  */
@@ -62,10 +66,22 @@ public class SatelliteConsole extends Block {
         return Core.bundle.get(ORBIT_KEYS[Math.max(0, Math.min(ORBIT_COUNT - 1, orbit))]);
     }
 
-    /** 卫星种类 × 轨道允许性：信号卫星限 LEO/MEO/GEO（SSO 不对信号卫星开放，供其他卫星类型使用） */
+    /** 卫星种类 × 轨道允许性：离子炮卫星限 LEO（“近地”就是它的约束）；信号卫星限 LEO/MEO/GEO（SSO 对信号卫星关闭） */
     public static boolean orbitAllowed(int type, int orbit) {
+        if (type == SatelliteLauncher.TYPE_ION) return orbit == ORBIT_LEO;
         return !(type == TYPE_SIGNAL && orbit == ORBIT_SSO);
     }
+
+    /**
+     * 由主机回执覆盖本地开关状态。放在方块类上（而不是内部类里）：客机收到 `sat-loic-result` 时
+     * 手边没有控制台实例，回执路径只需按 unitId 定位那份状态。
+     */
+    public static void applyLoicState(int unitId, int autoFire, int attackSats) {
+        LoicWeapon.State s = LoicWeapon.state(unitId);
+        s.autoFire = autoFire != 0;
+        s.attackSats = attackSats != 0;
+    }
+
 
     /** 耗电（/秒，Mindustry 按 /60 tick 计）：100 电力/秒 */
     public static final float POWER_CONSUMPTION = 100f / 60f;
@@ -112,8 +128,8 @@ public class SatelliteConsole extends Block {
         private int hubCount = 0;
         private int consoleCount = 0;
         private boolean consoleInRange = false;
-        /** SSO 轨道按钮（动态灰化用） */
-        private TextButton ssoBtn = null;
+        /** 四个轨道按钮（按「绑定种类 × 轨道允许性」逐个灰化；面板未建时为 null） */
+        private final TextButton[] orbitBtns = new TextButton[ORBIT_COUNT];
         /** 上次收到 sat-launch 请求的时间（tick；速率限制用，不落存档） */
         public float lastLaunchRequest = Float.NEGATIVE_INFINITY;
 
@@ -141,7 +157,7 @@ public class SatelliteConsole extends Block {
             hubCount = hubs.size;
             boundHub = hubCount == 1 ? hubs.first() : null;
             consoleCount = SatelliteManager.consolesInSignal(team, selectedSignal);
-            if (ssoBtn != null) ssoBtn.setDisabled(ssoBlocked());
+            updateOrbitButtons();
         }
 
         /** 绑定状态错误键（null=绑定正常可发射） */
@@ -150,11 +166,6 @@ public class SatelliteConsole extends Block {
             if (hubCount > 1) return "block.silicon-satellite-console.multihub";
             if (consoleCount > 1) return "block.silicon-satellite-console.multiconsole";
             return null;
-        }
-
-        /** SSO 是否灰化：绑定的中枢选择了信号卫星（信号卫星不能发 SSO，选中即灰化，与生产进度无关） */
-        boolean ssoBlocked() {
-            return boundHub != null && boundHub.selectedType == TYPE_SIGNAL;
         }
 
         /** 发射卫星：本队可点发射。权威端（主机/单机）直接执行；纯客机发请求由主机执行并广播/反馈结果 */
@@ -188,7 +199,6 @@ public class SatelliteConsole extends Block {
                 case SatelliteManager.LAUNCH_NO_HUB: key = "block.silicon-satellite-console.nohub"; break;
                 case SatelliteManager.LAUNCH_MULTI_HUB: key = "block.silicon-satellite-console.multihub"; break;
                 case SatelliteManager.LAUNCH_MULTI_CONSOLE: key = "block.silicon-satellite-console.multiconsole"; break;
-                case SatelliteManager.LAUNCH_TEST_SANDBOX: key = "block.silicon-satellite-console.sandboxOnly"; break;
                 default: key = "block.silicon-satellite-console.fail"; break;
             }
             if (result == SatelliteManager.LAUNCH_OK) {
@@ -198,19 +208,47 @@ public class SatelliteConsole extends Block {
             }
         }
 
+        /**
+         * 切换离子炮卫星的开关。权威端直接改；纯客机把**期望的新状态**打包发给主机，
+         * 并本地乐观更新（主机回执 `sat-loic-result` 会再覆盖一次，所以两台客机同时操作时以主机为准）。
+         *
+         * @param autoFire true = 切换"自动发射"，false = 切换"攻击低轨卫星"
+         */
+        void toggleLoic(int unitId, boolean autoFire) {
+            LoicWeapon.State s = LoicWeapon.state(unitId);
+            boolean nextAuto = autoFire ? !s.autoFire : s.autoFire;
+            boolean nextSats = autoFire ? s.attackSats : !s.attackSats;
+            if (Vars.net.active() && !SatelliteManager.isAuthority()) {
+                Call.serverPacketReliable("sat-loic", tileX() + "," + tileY() + "|" + unitId
+                        + "|" + (nextAuto ? 1 : 0) + "|" + (nextSats ? 1 : 0));
+            }
+            s.autoFire = nextAuto;
+            s.attackSats = nextSats;
+        }
+
         /** 选中时的小面板：仅一个"打开界面"按钮，点击后打开可拖动窗口 */
         @Override
         public void buildConfiguration(Table table) {
             table.clearChildren();
             table.top();
-            table.button(Core.bundle.get("block.silicon-satellite-console.open"), Styles.defaultt, () -> {
-                // 隐藏原版小面板（此时 showConfig 已完成，hide 动画正常生效），再打开可拖动窗口
-                if (Vars.control != null && Vars.control.input != null) {
-                    Vars.control.input.config.hideConfig();
-                }
-                openDialog();
-            }).size(160f, 48f).pad(4f);
+            // 直接进入操作界面：点击方块即可，不必再点一次按钮（原版核心/工厂也是"点开就是操作"）。
+            // buildConfiguration 只在"打开配置"时调用一次（不是每帧），所以这里 hideConfig + openDialog 是安全的；
+            // 此时 showConfig 已完成，hide 动画正常生效（与原按钮回调里的做法一致）。
+            if (Vars.control != null && Vars.control.input != null) {
+                Vars.control.input.config.hideConfig();
+            }
+            openDialog();
         }
+
+        // —— 界面页签（发射 / 在轨管理，两个页面分开）——
+
+        /** 当前是否停在「在轨管理」页（false = 发射页）。按方块持久化在实例上，重开窗口保持上次的页 */
+        private boolean rosterTab = false;
+        /** 当前内容容器（pane 提供的 Table），页签切换时对它重建 */
+        private Table contentTable;
+        /** 在轨列表行数节流检查（行数变化才重建整页，行内文本由 Prov 每帧求值） */
+        private int rosterTick = 0;
+        private int rosterRows = -1;
 
         /** 打开可拖动窗口 */
         void openDialog() {
@@ -221,17 +259,167 @@ public class SatelliteConsole extends Block {
             // 尺寸按屏幕比例动态计算（大屏封顶 660×580，小屏按比例缩小；内容增加轨道区后调高上限）
             float w = Math.min(660f, Core.graphics.getWidth() * 0.6f);
             float h = Math.min(580f, Core.graphics.getHeight() * 0.82f);
-            dialog.cont.pane(content -> rebuildFull(content, dialog)).width(w).height(h).pad(10f);
+            // 顶部页签：发射 / 在轨管理（两个页面分开，共用下面的内容容器）
+            dialog.cont.table(tabs -> {
+                ButtonGroup<TextButton> group = new ButtonGroup<>();
+                group.setMinCheckCount(0);
+                TextButton launchBtn = new TextButton(
+                        Core.bundle.get("block.silicon-satellite-console.tab.launch"), Styles.flatTogglet);
+                TextButton rosterBtn = new TextButton(
+                        Core.bundle.get("block.silicon-satellite-console.tab.roster"), Styles.flatTogglet);
+                launchBtn.setChecked(!rosterTab);
+                rosterBtn.setChecked(rosterTab);
+                launchBtn.clicked(() -> switchTab(false, dialog));
+                rosterBtn.clicked(() -> switchTab(true, dialog));
+                group.add(launchBtn);
+                group.add(rosterBtn);
+                tabs.add(launchBtn).size(150f, 40f).pad(2f);
+                tabs.add(rosterBtn).size(150f, 40f).pad(2f);
+            }).padBottom(6f).row();
+            dialog.cont.pane(content -> {
+                contentTable = content;
+                rebuildTab(content, dialog);
+            }).width(w).height(h).pad(10f);
             dialog.buttons.button(Core.bundle.get("block.silicon-satellite-console.close"), Styles.defaultt, dialog::hide)
                     .size(120f, 40f).padTop(6f);
             dialog.show();
         }
 
-        /** 卫星种类短名（信号卫星 / 测试卫星，bundle） */
+        /** 切页：只重建内容容器（页签按钮的选中态由 ButtonGroup 自己维护） */
+        void switchTab(boolean roster, BaseDialog dialog) {
+            if (rosterTab == roster) return;
+            rosterTab = roster;
+            rosterRows = -1; // 强制下一次进入在轨页时重建
+            if (contentTable != null) rebuildTab(contentTable, dialog);
+        }
+
+        /** 按当前页签重建内容 */
+        void rebuildTab(Table content, BaseDialog dialog) {
+            content.clearChildren();
+            content.top();
+            if (rosterTab) {
+                rebuildRoster(content, dialog);
+            } else {
+                rebuildFull(content, dialog);
+            }
+        }
+
+        /**
+         * 在轨管理页：本队名册概览 + 逐星状态（编码 / 轨道 / 信道 / 门控与覆盖 / 进度 / 定位）。
+         * <p>行内文本一律走 {@code label(Prov)} 每帧求值，只有**行数变化**（新发射 / 被击落 / 读档换图）
+         * 才重建整页——卫星的位置与覆盖每帧都在变，全量重建会有明显开销。
+         */
+        void rebuildRoster(Table table, BaseDialog dialog) {
+            table.clearChildren();
+            table.top();
+            // 概览：在轨总数 + 待发射（按轨道分组计数在第二行）
+            table.label(() -> Core.bundle.format("block.silicon-satellite-console.roster.summary",
+                    SatelliteManager.launchedCount(team), SatelliteManager.readyCount(team)))
+                    .color(Color.lightGray).pad(2f).row();
+
+            arc.struct.Seq<SatelliteManager.SatelliteRecord> list = SatelliteManager.satellites(team);
+            if (list.isEmpty()) {
+                table.label(() -> Core.bundle.get("block.silicon-satellite-console.roster.empty"))
+                        .color(Color.lightGray).pad(12f).row();
+                return;
+            }
+            // 表头：与数据行**逐列同宽、同空隙**，且外层 cell 左对齐（.left() 作用于表格整体位置）——
+            // 列内不再左对齐，回到 arc 默认的居中；每列 pad(4f) 让相邻列空隙一致。
+            // （上一版把 .left() 加在列内 label 上，列内就变成了左对齐；但外层若不加 .left()，两张表
+            //   会各自居中、总宽不同就整列错位。所以这里是"外层左对齐 + 列内居中"两件事。）
+            table.row();
+            Table head = new Table();
+            head.label(() -> Core.bundle.get("block.silicon-satellite-console.roster.code")).width(64f).pad(4f);
+            head.label(() -> Core.bundle.get("block.silicon-satellite-console.roster.type")).width(72f).pad(4f);
+            head.label(() -> Core.bundle.get("block.silicon-satellite-console.roster.orbit")).width(48f).pad(4f);
+            head.label(() -> Core.bundle.get("block.silicon-satellite-console.roster.channel")).width(40f).pad(4f);
+            head.label(() -> Core.bundle.get("block.silicon-satellite-console.roster.health")).width(150f).pad(4f);
+            table.add(head).left().pad(2f).row();
+            for (SatelliteManager.SatelliteRecord r : list) {
+                addRosterRow(table, r);
+            }
+            // 行数变化（发射 / 击落 / 读档）时重建整页；否则只让上面的 Prov 自己刷新
+            rosterRows = list.size;
+            table.update(() -> {
+                if (!rosterTab || contentTable == null) return;
+                if (++rosterTick < 15) return;
+                rosterTick = 0;
+                if (SatelliteManager.satellites(team).size != rosterRows) {
+                    rebuildTab(contentTable, dialog);
+                }
+            });
+        }
+
+        /** 在轨列表的一行：主数据列与表头同宽；武器操作独占下一行，避免窄窗口横向溢出。 */
+        void addRosterRow(Table table, SatelliteManager.SatelliteRecord r) {
+            table.row();
+            Table row = new Table();
+            row.label(() -> r.code == null
+                            ? Core.bundle.get("block.silicon-satellite-console.nobind") : r.code)
+                    .color(r.code == null ? Color.lightGray : Color.white).width(64f).pad(4f);
+            row.label(() -> typeShortName(r)).color(Color.lightGray).width(72f).pad(4f);
+            row.label(() -> orbitKeyShort(r.orbit)).width(48f).pad(4f);
+            row.label(() -> r.channel >= 1 ? String.valueOf(r.channel) : "-").width(40f).pad(4f);
+            // 血量：直接读实体，每帧求值 → 掉血立刻可见。实体不在名册里说明丢失；
+            // 编码的地面源全没了则在血量后加「静默」后缀（卫星还在轨，但不广播了）
+            row.label(() -> {
+                mindustry.gen.Unit u = Groups.unit.getByID(r.unitId);
+                if (u == null) return Core.bundle.get("block.silicon-satellite-console.roster.state.missing");
+                String hp = (int) u.health + "/" + (int) u.maxHealth;
+                return (r.code != null && !SignalChannel.hasLiveSource(team, r.code))
+                        ? hp + " " + Core.bundle.get("block.silicon-satellite-console.roster.state.muted")
+                        : hp;
+            }).color(Color.lightGray).width(150f).pad(4f);
+            table.add(row).left().pad(2f).row();
+
+            // 离子炮卫星的 LOIC 操作栏单独成行，
+            // 不再把两个长按钮叠加到五列主表后面，避免小窗口重叠和横向越界。
+            if (r.type == SatelliteLauncher.TYPE_ION) {
+                Table controls = new Table();
+                controls.left();
+                controls.label(() -> {
+                    LoicWeapon.State s = LoicWeapon.peekState(r.unitId);
+                    return Core.bundle.format("block.silicon-satellite-console.loic.ammo",
+                            s == null ? 0 : (int) s.ammo, (int) SatelliteUnits.ION_MAGAZINE);
+                }).color(Color.lightGray).width(100f).pad(2f);
+                TextButton autoBtn = new TextButton(
+                        Core.bundle.get("block.silicon-satellite-console.loic.auto"), Styles.flatTogglet);
+                autoBtn.clicked(() -> toggleLoic(r.unitId, true));
+                controls.add(autoBtn).size(100f, 32f).pad(2f);
+                TextButton satsBtn = new TextButton(
+                        Core.bundle.get("block.silicon-satellite-console.loic.sats"), Styles.flatTogglet);
+                satsBtn.clicked(() -> toggleLoic(r.unitId, false));
+                controls.add(satsBtn).size(100f, 32f).pad(2f);
+                // 状态每帧回读：主机或其他客机改动经回执同步后，按钮状态仍保持一致。
+                controls.update(() -> {
+                    LoicWeapon.State st = LoicWeapon.state(r.unitId);
+                    if (autoBtn.isChecked() != st.autoFire) autoBtn.setChecked(st.autoFire);
+                    if (satsBtn.isChecked() != st.attackSats) satsBtn.setChecked(st.attackSats);
+                });
+                table.add(controls).left().padLeft(8f).padBottom(3f).row();
+            }
+        }
+
+        /** 在轨管理显示名：优先按实体机型识别靶标/SSO，旧存档类型再回退到 type 字段。 */
+        String typeShortName(SatelliteManager.SatelliteRecord r) {
+            mindustry.gen.Unit u = Groups.unit.getByID(r.unitId);
+            if (u != null && u.type == SatelliteUnits.targetSatellite) {
+                return Core.bundle.get("block.silicon-satellite-console.type.short.target");
+            }
+            if (u != null && u.type == SatelliteUnits.testSso) {
+                return Core.bundle.get("block.silicon-satellite-console.type.short.sso");
+            }
+            return typeShortName(r.type);
+        }
+
+        /** 发射页与中枢选择器使用的可生产类型短名。 */
         String typeShortName(int type) {
-            return type == TYPE_SIGNAL
-                    ? Core.bundle.get("block.silicon-satellite-console.type.short.signal")
-                    : Core.bundle.get("block.silicon-satellite-console.type.short.test");
+            switch (type) {
+                case SatelliteLauncher.TYPE_ION:
+                    return Core.bundle.get("block.silicon-satellite-console.type.short.ion");
+                default:
+                    return Core.bundle.get("block.silicon-satellite-console.type.short.signal");
+            }
         }
 
         /** 名称行：绑定的中枢所准备发射/制造中的卫星（动态；未绑定或异常时显示 —） */
@@ -240,14 +428,15 @@ public class SatelliteConsole extends Block {
                 String r = Core.bundle.get("block.silicon-satellite-console.name.none");
                 String m = Core.bundle.get("block.silicon-satellite-console.name.none");
                 if (boundHub != null) {
-                    if (boundHub.produced) r = typeShortName(boundHub.selectedType);
-                    if (!boundHub.produced && boundHub.progress > 0f) m = typeShortName(boundHub.selectedType);
+                    if (boundHub.produced) r = typeShortName(boundHub.lockedType);
+                    if (!boundHub.produced && boundHub.progress > 0f) m = typeShortName(boundHub.lockedType);
                 }
                 return Core.bundle.format("block.silicon-satellite-console.name.line", r, m);
             }).color(Color.lightGray).pad(2f);
         }
 
-        /** 轨道选择按钮行（4 单选）；绑定的中枢选择信号卫星时 SSO 即灰化（信号卫星不能发 SSO） */
+        /** 轨道选择按钮行（4 单选）。灰化规则统一由「绑定中枢的种类 × 轨道允许性」决定：
+         *  离子炮只能 LEO（"近地"即约束），信号卫星不能 SSO。 */
         void rebuildOrbitRow(Table table) {
             table.row();
             table.label(() -> Core.bundle.format("block.silicon-satellite-console.orbit.current", orbitName(selectedOrbit)))
@@ -258,7 +447,6 @@ public class SatelliteConsole extends Block {
             Table row = new Table();
             ButtonGroup<TextButton> group = new ButtonGroup<>();
             group.setMinCheckCount(0); // 允许全不选（默认 1 会在 add() 时强制勾选第一个按钮，且无法取消）
-            ssoBtn = null;
             for (int o = ORBIT_LEO; o < ORBIT_COUNT; o++) {
                 final int orbit = o;
                 TextButton btn = new TextButton(orbitKeyShort(orbit), Styles.flatTogglet);
@@ -268,10 +456,91 @@ public class SatelliteConsole extends Block {
                     configure(orbit);
                 });
                 group.add(btn);
-                if (orbit == ORBIT_SSO) ssoBtn = btn;
+                orbitBtns[orbit] = btn;
                 row.add(btn).size(110f, 40f).pad(2f);
             }
             table.add(row).pad(2f);
+            updateOrbitButtons();
+        }
+
+        /** 绑定中枢当前选择的种类（未绑定时按信号卫星处理） */
+        int boundType() {
+            // boundHub 可能为 null（未绑定信号 / 中枢被拆）：必须先判空，否则面板渲染时抛 NPE
+            if (boundHub == null) return TYPE_SIGNAL;
+            // 已锁定（生产中或已生产完）的那一颗用 lockedType：轨道灰化必须与发射判定（launch 里
+            // 同样读 lockedType）保持一致，否则会出现"按钮允许这个轨道、点发射却被拒"的错位。
+            // 尚未开始生产时用 selectedType，此时它就是在预览"下一颗"。
+            if (boundHub.produced || boundHub.progress > 0f) return boundHub.lockedType;
+            return boundHub.selectedType;
+        }
+
+        /**
+         * 类型选择按钮行（发射页）：与发射中枢面板的三个选项一致，点击即设置**绑定的中枢**。
+         * <p>
+         * 类型本身属于生产、权威在中枢（`configure` 会走服务器同步）；放在这里是因为操作发射时
+         * 不该为了选个类型再跑一趟中枢——玩家会在控制台找"发射"，找不到入口就等于不能发射。
+         */
+        void rebuildTypeRow(Table table) {
+            table.row();
+            table.label(() -> Core.bundle.get("block.silicon-satellite-console.type.title"))
+                    .color(Color.lightGray).pad(2f);
+            table.row();
+            Table row = new Table();
+            ButtonGroup<TextButton> group = new ButtonGroup<>();
+            group.setMinCheckCount(0);
+            arc.struct.Seq<TextButton> btns = new arc.struct.Seq<>();
+            arc.struct.IntSeq types = new arc.struct.IntSeq();
+            for (int t : SatelliteLauncher.TYPES) {
+                final int type = t;
+                TextButton btn = new TextButton(typeShortName(type), Styles.flatTogglet);
+                btn.setChecked(boundType() == type);
+                btn.clicked(() -> {
+                    if (boundHub != null) boundHub.configure(type);
+                });
+                group.add(btn);
+                btns.add(btn);
+                types.add(type);
+                row.add(btn).size(96f, 40f).pad(2f);
+            }
+            table.add(row).pad(2f);
+            // 中枢的配置变化（或换绑）后按钮要跟着走：每帧回读，避免出现"选中态与中枢不符"
+            row.update(() -> {
+                int cur = boundType();
+                for (int i = 0; i < btns.size; i++) {
+                    TextButton b = btns.get(i);
+                    boolean want = cur == types.get(i);
+                    if (b.isChecked() != want) b.setChecked(want);
+                }
+            });
+        }
+
+        /**
+         * 按种类刷新轨道按钮可用性；若当前选中项被新种类禁止（例如刚从信号卫星切成离子炮、而选的是 MEO），
+         * 自动回退到第一个允许的轨道并同步下发配置 —— 否则会带着一个非法轨道去发射。
+         */
+        void updateOrbitButtons() {
+            int type = boundType();
+            boolean changed = false;
+            for (int o = ORBIT_LEO; o < ORBIT_COUNT; o++) {
+                TextButton btn = orbitBtns[o];
+                if (btn == null) continue;
+                boolean blocked = !orbitAllowed(type, o);
+                btn.setDisabled(blocked);
+                if (blocked && selectedOrbit == o) {
+                    for (int k = ORBIT_LEO; k < ORBIT_COUNT; k++) {
+                        if (orbitAllowed(type, k)) {
+                            selectedOrbit = k;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (changed) {
+                TextButton sel = orbitBtns[selectedOrbit];
+                if (sel != null) sel.setChecked(true);
+                configure(selectedOrbit);
+            }
         }
 
         /** 轨道按钮短标签（LEO 等） */
@@ -321,6 +590,8 @@ public class SatelliteConsole extends Block {
                 configure("");
                 rebuildSourceButtons(srcTable, search.getText().trim());
             }).size(88f, 40f).padTop(2f);
+            // 类型区（与中枢面板一致；直接在这里选，不必再跑一趟中枢）
+            rebuildTypeRow(table);
             // 轨道区
             rebuildOrbitRow(table);
             table.row();
@@ -413,6 +684,7 @@ public class SatelliteConsole extends Block {
             // v2:追加本队卫星名册快照。卫星实体的编码/信道/相位无处随单位持久化（无自定义实体组件），
             // 由控制台代存——所有控制台写同一份全局快照，读侧按 unitId 去重并集，任一存活控制台即可恢复。
             // 相位在保存时推进到当前时刻（扫描进度 u，GEO 为定点方位角）：读档后 Time.time 归零，轨迹位置以存档进度续接，卫星不跳位
+            // v3:每条追加 type（信号卫星/离子炮）——类型与轨道正交，光靠 orbit 推不出来
             arc.struct.Seq<SatelliteManager.SatelliteRecord> list = SatelliteManager.satellites(team);
             // 条目数上限：与读侧的 ROSTER_MAX 必须是同一个常量（读侧还额外保证消费全部条目，见 read()）。
             int n = Math.min(list.size, ROSTER_MAX);
@@ -423,6 +695,7 @@ public class SatelliteConsole extends Block {
                 write.i(r.channel);
                 write.i(r.orbit);
                 write.str(r.code == null ? "" : r.code);
+                write.i(r.type);
                 write.i(Float.floatToIntBits(SatelliteManager.phaseForSave(r)));
             }
         }
@@ -449,17 +722,20 @@ public class SatelliteConsole extends Block {
                     int channel = read.i();
                     int orbit = read.i();
                     String code = read.str();
+                    // v3 起在该位置追加 type；旧档（revision < 3）没有这个字段，按信号卫星处理。
+                    // 顺序必须与 write 严格一致：unitId → channel → orbit → code → **type** → phase
+                    int type = (revision >= 3) ? read.i() : TYPE_SIGNAL;
                     float phase = Float.intBitsToFloat(read.i());
                     if (restored >= ROSTER_MAX) continue;
                     restored++;
-                    SatelliteManager.restoreRecord(team, unitId, channel, orbit, code, phase);
+                    SatelliteManager.restoreRecord(team, unitId, channel, orbit, code, phase, type);
                 }
             }
         }
 
         @Override
         public byte version() {
-            return 2;
+            return 3;
         }
     }
 }

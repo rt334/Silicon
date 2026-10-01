@@ -7,6 +7,7 @@ import mindustry.type.ItemStack;
 import mindustry.world.Block;
 import mindustry.world.meta.BuildVisibility;
 import silicon.world.blocks.container.DualPurposeStorager;
+import silicon.world.blocks.defense.AsatInterceptor;
 import silicon.world.blocks.defense.Switch;
 import silicon.world.blocks.distribution.ItemTransferHub;
 import silicon.world.blocks.distribution.Junction;
@@ -20,6 +21,7 @@ import silicon.world.blocks.satellite.SatelliteConsole;
 import silicon.world.blocks.satellite.SatelliteLauncher;
 import silicon.world.blocks.sandbox.MessageTest;
 import silicon.world.blocks.signal.DimensionAnchor;
+import silicon.world.blocks.signal.SatelliteLocator;
 import silicon.world.blocks.signal.SignalDetector;
 import silicon.world.blocks.signal.SignalJammer;
 import silicon.world.blocks.signal.SignalRelay;
@@ -31,7 +33,8 @@ public class Blocks {
     public static Block powerGeneratorPump, dualPurposeJunction, dualPurposeStorager,
             rollGenerator, powerProtector, powerSource, mineConverter, theSwitch, itemTransferHub,
             dimensionAnchor, signalSource, universalJunction, signalRelay, signalJammer,
-            satelliteLauncher, satelliteConsole, messageTest, signalDetector;
+            satelliteLauncher, satelliteConsole, messageTest, signalDetector, asatInterceptor,
+            satelliteLocator;
 
     public static void load() {
         powerGeneratorPump = new GeneratorPump("power-generator-pump") {{
@@ -172,6 +175,29 @@ public class Blocks {
             alwaysUnlocked = true;
             size = 1;
             health = 60;
+        }};
+        // 反卫星拦截塔（第二阶段）：新方块一律追加到末尾，绝不插在已注册方块之间——
+        // 插队会移动其后所有方块的内容 ID，虽然存档按内容名映射、但仍会打乱与上游的注册序
+        asatInterceptor = new AsatInterceptor("asat-interceptor") {{
+            // 与卫星发射中枢同级别的材料门槛：拦截卫星本身就该是重投入（平衡见 AsatInterceptor 类注释）
+            requirements(Category.turret, BuildVisibility.shown,
+                    ItemStack.with(Items.copper, 500, Items.lead, 350, Items.silicon, 450,
+                            Items.titanium, 250, Items.thorium, 150, Items.plastanium, 120, Items.surgeAlloy, 80));
+            alwaysUnlocked = true;
+            size = 2;
+            health = 1200;
+            armor = 6f;
+        }};
+        // 卫星定位器（第二阶段）：同样追加在末尾——拦截塔要靠它指路
+        satelliteLocator = new SatelliteLocator("satellite-locator") {{
+            // 探测半径 80 格：与反卫星拦截塔射程一致（探得到就打得到），材料门槛按此定位（另见 2000/秒 的待机耗电）
+            requirements(Category.effect, BuildVisibility.shown,
+                    ItemStack.with(Items.copper, 800, Items.lead, 600, Items.silicon, 700,
+                            Items.titanium, 450, Items.thorium, 250, Items.plastanium, 150,
+                            Items.metaglass, 200));
+            alwaysUnlocked = true;
+            size = 2;
+            health = 900;
         }};
 
     }
