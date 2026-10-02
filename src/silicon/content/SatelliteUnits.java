@@ -31,10 +31,11 @@ import silicon.util.SatelliteManager;
  *   单位间推挤由 layerFlying/layerGround 物理体实现，与 hittable 无关；不加此旗标卫星
  *   会被编入 flying 物理层与飞行单位互相推挤（实测过的坑）。
  * - playerControllable = true：可被玩家按 Ctrl 接管（原版 possess 流程；InputHandler.java:783 判定
- *   unit.isAI() && team 相同 && !dead && playerControllable()）。代价与现状：接管后引擎会把
- *   controller 换成 CommandAI（UnitType.java:281 的分支），OrbitSatelliteController 随之停止运行——
- *   卫星会停在当前位置；玩家放手后引擎重新下发 AI 控制器（UnitComp.java:844 的 isValidController
- *   分支），轨迹从存档相位续接，不跳位。**尚未实现**用玩家输入驱动卫星自由飞行。
+ *   unit.isAI() && team 相同 && !dead && playerControllable()）。**两者缺一不可**——
+ *   OrbitSatelliteController 继承 AIController，isAI() 才为真（UnitComp.java:494 是 instanceof 判定）。
+ *   接管前后用的都是同一个 controller（见下方 controller 显式指定的说明），轨迹不中断；接管期间由
+ *   update(Unit) 补位驱动（possess 会把 controller 换成 Player 对象本身）；applyMotion 每帧把 vel
+ *   归零，玩家输入改不动轨迹——能进去看，推不动它。
  * - logicControllable = false：逻辑处理器不可操控。
  * - allowedInPayloads = false：不可被 payload 方块装载搬运。
  * - drawMinimap = false：小地图不画（MinimapRenderer.java:158 过滤）——敌方小地图看不到卫星过境
@@ -248,8 +249,8 @@ public class SatelliteUnits {
                                  // 单位间推挤在 layerFlying 物理体间发生，与 hittable 无关——
                                  // 不加此旗标卫星会被编入 flying 物理层，与飞行单位互相推挤
                 killable = true; // 保留 scripted 击落能力
-                playerControllable = true; // 允许玩家按 Ctrl 接管（原版 possess）；接管期间控制器被换成
-                                           // CommandAI，轨迹暂停在当前位置，放手后由存档相位续接
+                playerControllable = true; // 允许玩家按 Ctrl 接管（原版 possess）；接管前后轨迹都由
+                                           // OrbitSatelliteController.applyMotion 驱动，运动不中断
                 logicControllable = false;
                 allowedInPayloads = false;
                 drawMinimap = false;
@@ -258,7 +259,17 @@ public class SatelliteUnits {
                 hitSize = 24f;
 
                 // 轨道控制器（按轨道携带周期/半径参数；无状态，读档经 type 工厂重建即续接）
-                aiController = () -> new OrbitSatelliteController(orbit);
+                //
+                // 必须显式指定 controller，不能只设 aiController —— 这是踩过的坑：
+                // UnitType.java:281 的默认 controller 工厂是
+                //     u -> !playerControllable || (u.team.isAI() && !u.team.rules().rtsAi)
+                //          ? aiController.get() : new CommandAI();
+                // aiController 只在该三元的第一个分支被引用。playerControllable=true 且队伍是玩家时
+                // 走第二支，引擎直接给 new CommandAI()，aiController 根本不会被调用 —— 卫星失去唯一的
+                // 运动驱动源，读档与刚发射的都静止不动。
+                // 显式指定后 controller 与 playerControllable 解耦：无论是否被接管，卫星拿到的始终是
+                // 这个控制器，轨迹连续（接管期间由 update 钩子补位驱动）。
+                controller = u -> new OrbitSatelliteController(orbit);
 
                 // 免疫全部状态效果（含本 mod 的卫星 buff——buff 只上玩家单位，这里只是防御性兜底）
                 Vars.content.statusEffects().each(effect -> immunities.add(effect));
@@ -266,6 +277,20 @@ public class SatelliteUnits {
                 // 未来激光卫星的攻击面：只打地面、永不索敌空中（含卫星）——层间隔离在机型层再锁一道
                 targetAir = false;
                 targetGround = true;
+            }
+
+            @Override
+            public void update(Unit unit){
+                // 玩家接管期间补位：possess 会把 controller 换成 Player 对象本身（判据是
+                // UnitComp.java:950 的 isPlayer() = controller instanceof Player），此后
+                // UnitComp.java:839-841 调的是 Player.updateUnit()，轨迹控制器不再被驱动，卫星原地冻结。
+                // UnitType.update 由 UnitComp.java:654 无条件每帧调用、与 controller 无关，用它补位。
+                // 判据 unit.getPlayer()（UnitComp.java:955）：只有真被接管时才补位 —— 未接管时
+                // controller 仍是轨迹控制器、updateUnit 已在驱动，这里再跑会双倍累加相位。
+                // !net.client() 保证相位只在服务端累加一次，客机仍旧靠单位同步取位置。
+                if(!Vars.net.client() && unit.getPlayer() != null){
+                    OrbitSatelliteController.applyMotion(unit, orbit);
+                }
             }
 
             @Override
