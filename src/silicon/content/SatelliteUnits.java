@@ -30,8 +30,11 @@ import silicon.util.SatelliteManager;
  * - physics = false：退出异步物理系统（PhysicsProcess.begin 的 type.physics 过滤）——
  *   单位间推挤由 layerFlying/layerGround 物理体实现，与 hittable 无关；不加此旗标卫星
  *   会被编入 flying 物理层与飞行单位互相推挤（实测过的坑）。
- * - playerControllable = false：控制器永远走 aiController（UnitType.java:281），
- *   isCommandable() 恒假（非 CommandAI）→ 玩家框选/指挥无法改变其位置。
+ * - playerControllable = true：可被玩家按 Ctrl 接管（原版 possess 流程；InputHandler.java:783 判定
+ *   unit.isAI() && team 相同 && !dead && playerControllable()）。代价与现状：接管后引擎会把
+ *   controller 换成 CommandAI（UnitType.java:281 的分支），OrbitSatelliteController 随之停止运行——
+ *   卫星会停在当前位置；玩家放手后引擎重新下发 AI 控制器（UnitComp.java:844 的 isValidController
+ *   分支），轨迹从存档相位续接，不跳位。**尚未实现**用玩家输入驱动卫星自由飞行。
  * - logicControllable = false：逻辑处理器不可操控。
  * - allowedInPayloads = false：不可被 payload 方块装载搬运。
  * - drawMinimap = false：小地图不画（MinimapRenderer.java:158 过滤）——敌方小地图看不到卫星过境
@@ -245,7 +248,8 @@ public class SatelliteUnits {
                                  // 单位间推挤在 layerFlying 物理体间发生，与 hittable 无关——
                                  // 不加此旗标卫星会被编入 flying 物理层，与飞行单位互相推挤
                 killable = true; // 保留 scripted 击落能力
-                playerControllable = false;
+                playerControllable = true; // 允许玩家按 Ctrl 接管（原版 possess）；接管期间控制器被换成
+                                           // CommandAI，轨迹暂停在当前位置，放手后由存档相位续接
                 logicControllable = false;
                 allowedInPayloads = false;
                 drawMinimap = false;
