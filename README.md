@@ -9,7 +9,7 @@
 一个添加了个人创意的 Mindustry 模组（`v160.5+`），提供多种实用方块与便捷功能。
 
 <!-- FORK-BUILD:BEGIN -->
-> **最新构建**（自动维护，请勿手改本区块）：分支 `fork/main` · 提交 `a0f7a51` · 2026-10-02 02:10 UTC · [下载 jar](https://github.com/rt334/Silicon/releases/tag/fork-latest)
+> **最新构建**（自动维护，请勿手改本区块）：分支 `fork/main` · 提交 `51f8e12` · 2026-10-02 02:43 UTC · [下载 jar](https://github.com/rt334/Silicon/releases/tag/fork-latest)
 <!-- FORK-BUILD:END -->
 
 ## 方块与物品
