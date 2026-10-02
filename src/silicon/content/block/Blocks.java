@@ -159,17 +159,19 @@ public class Blocks {
             size = 3;
             health = 400;
         }};
-        // “消息测试”调试方块：位置与上游 test（PR #58）保持一致（satelliteConsole 之后），
-        // 便于后续同步上游时减少改动。注意 Mindustry 存档按**内容名**映射（ContentLoader 头表），
-        // 注册顺序本身不决定旧存档兼容；顺序真正影响的是各内容的 content id。
+        // 注册序规则（**两条并存**，别照其中一条去改另一处）：
+        //   ① 与上游 test 对齐的方块（satelliteLauncher / satelliteConsole）固定插在 messageTest
+        //      之前 —— 纯为减少后续同步上游时的改动量；
+        //   ② 其余新方块一律追加到**末尾**（signalDetector）。
+        // Mindustry 存档按**内容名**映射（ContentLoader 头表），注册顺序本身不决定旧存档兼容；
+        // 真正受顺序影响的是各内容的 content id —— 插队会移动其后所有方块。
         messageTest = new MessageTest("message-test") {{
             requirements(Category.effect, BuildVisibility.sandboxOnly, with());
             alwaysUnlocked = true;
             size = 1;
             health = 60;
         }};
-        // 信号检测器：新方块一律追加在末尾，与上游注册序保持一致（纯测量设备，无游戏逻辑）。
-        // 顺序不决定存档兼容（存档按内容名映射），但插队会移动其后所有方块的 content id。
+        // 信号检测器：按上面规则 ②，追加在末尾（纯测量设备，无游戏逻辑）。
         signalDetector = new SignalDetector("signal-detector") {{
             requirements(Category.effect, BuildVisibility.shown,
                     ItemStack.with(Items.copper, 5, Items.silicon, 4));

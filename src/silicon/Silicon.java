@@ -166,24 +166,38 @@ public class Silicon extends Mod {
             };
             try {
                 String[] parts = data.split("\\|", -1);
+                // 以下三条是**畸形/无效包**的快路径：只回包、不记日志。
+                // 理由：它们在限流之前（限流需要 cb，而 cb 要先解析出 tile），改造客户端可用
+                // 畸形包或"有效坐标但不指向控制台"的包高频刷屏，把每包一条日志变成绕过 0.5s
+                // 窗口的日志放大。合法客户端根本不会走到这里，所以不给线索也不影响排查。
                 if (parts.length != 3) {
-                    deny.accept("fail", "malformed packet (fields)");
+                    deny.accept("fail", null);
                     return;
                 }
                 String[] xy = parts[0].split(",");
                 if (xy.length != 2) {
-                    deny.accept("fail", "malformed packet (coords)");
+                    deny.accept("fail", null);
                     return;
                 }
                 mindustry.world.Tile tile = world.tile(
                         Integer.parseInt(xy[0].trim()), Integer.parseInt(xy[1].trim()));
                 if (tile == null || !(tile.build instanceof silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild)) {
-                    // 控制台可能已被拆除/替换:给请求者明确反馈,而非无声死点击
-                    deny.accept("fail", "invalid console tile");
+                    deny.accept("fail", null);
                     return;
                 }
                 silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild cb =
                         (silicon.world.blocks.satellite.SatelliteConsole.SatelliteConsoleBuild) tile.build;
+                // 速率限制提前到**拿到 cb 之后的第一件事**：下面 team/enabled/orbit/编码四条校验
+                // 都会经 deny 记一次日志，若限流留在它们之后，改造客户端可用越权/畸形请求绕开
+                // 0.5s 窗口刷日志。这里按控制台限流（合法双击本来也会因 produced 已清空而失败，
+                // 限流只挡重放，不影响正常操作）。
+                // 限流必须与"真实失败"用不同回包：都回 "fail" 会让合法双击的第二次弹「发射失败」，
+                // 把"点太快"误导成"配置有问题"。
+                if (Time.time - cb.lastLaunchRequest < LAUNCH_REQUEST_COOLDOWN_TICKS) {
+                    deny.accept("busy", null);
+                    return;
+                }
+                cb.lastLaunchRequest = Time.time;
                 if (cb.team != p.team()) {
                     // 只能操作本队控制台;越权请求回笼统 fail(细节只进日志,不向可疑客户端透露原因)
                     deny.accept("fail", "team mismatch");
@@ -193,16 +207,6 @@ public class Silicon extends Mod {
                     deny.accept("disabled", null);
                     return;
                 }
-                // 速率限制：每个请求都会做一遍"信号范围 + 1:1 配对"扫描（O(建筑×源)），
-                // 改造客户端可高频重放刷 CPU；这里按控制台 0.5s 限流（合法双击本来也会因 produced
-                // 已清空而失败，限流只挡重放，不影响正常操作）
-                if (Time.time - cb.lastLaunchRequest < LAUNCH_REQUEST_COOLDOWN_TICKS) {
-                    // 限流必须与"真实失败"用不同回包：都回 "fail" 会让合法双击的第二次弹「发射失败」，
-                    // 把"点太快"误导成"配置有问题"
-                    deny.accept("busy", null);
-                    return;
-                }
-                cb.lastLaunchRequest = Time.time;
                 int orbit;
                 try {
                     orbit = Integer.parseInt(parts[2].trim());
