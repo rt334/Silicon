@@ -132,7 +132,7 @@ public class Blocks {
             alwaysUnlocked = true;
             size = 1;
         }};
-        // 信号中继器注册在最后：保证旧存档（含维度锚点/旧信号源/万能枢纽）的方块 ID 不被后续新增方块打乱
+        // 信号中继器：按添加顺序排列（当时追加到末尾；见 messageTest 处的注册序规则）
         signalRelay = new SignalRelay("signal-relay") {{
             requirements(Category.effect, BuildVisibility.shown,
                     ItemStack.with(Items.copper, 15, Items.lead, 10, Items.silicon, 12));
@@ -161,14 +161,21 @@ public class Blocks {
             size = 3;
             health = 400;
         }};
-        // “消息测试”调试方块：上游 test（PR #58）既有注册位置（satelliteConsole 之后），不挪动以保上游存档 ID
+        // 注册序规则（**按添加时间推进，勿插队**）：
+        //   ① 与上游 test 对齐的方块（satelliteLauncher / satelliteConsole）固定排在 messageTest
+        //      之前，与上游 #58 的注册位置一致 —— 纯为减少后续同步上游时的改动量；
+        //   ② 其余方块一律追加到**当时的末尾**（signalRelay → signalDetector → asatInterceptor
+        //      → satelliteLocator 依次），绝不插回已注册方块之间：插队会移动其后所有方块的内容 ID。
+        // Mindustry 存档按**内容名**映射（ContentLoader 头表），注册顺序本身不决定旧存档兼容；
+        // 真正受顺序影响的是各内容的 content id —— 所以下面几处「注册在最后」的说法是历史的，
+        // 指「当时追加到了末尾」，不是「当前位于末尾」，勿据此改动顺序。
         messageTest = new MessageTest("message-test") {{
             requirements(Category.effect, BuildVisibility.sandboxOnly, with());
             alwaysUnlocked = true;
             size = 1;
             health = 60;
         }};
-        // 信号检测器注册在最后：保证旧存档方块 ID 不被后续新增方块打乱（纯测量设备，无游戏逻辑）
+        // 信号检测器：按规则 ② 追加（纯测量设备，无游戏逻辑）
         signalDetector = new SignalDetector("signal-detector") {{
             requirements(Category.effect, BuildVisibility.shown,
                     ItemStack.with(Items.copper, 5, Items.silicon, 4));
@@ -176,8 +183,7 @@ public class Blocks {
             size = 1;
             health = 60;
         }};
-        // 反卫星拦截塔（第二阶段）：新方块一律追加到末尾，绝不插在已注册方块之间——
-        // 插队会移动其后所有方块的内容 ID，虽然存档按内容名映射、但仍会打乱与上游的注册序
+        // 反卫星拦截塔（第二阶段）：按规则 ② 追加
         asatInterceptor = new AsatInterceptor("asat-interceptor") {{
             // 与卫星发射中枢同级别的材料门槛：拦截卫星本身就该是重投入（平衡见 AsatInterceptor 类注释）
             requirements(Category.turret, BuildVisibility.shown,
@@ -188,7 +194,7 @@ public class Blocks {
             health = 1200;
             armor = 6f;
         }};
-        // 卫星定位器（第二阶段）：同样追加在末尾——拦截塔要靠它指路
+        // 卫星定位器（第二阶段）：按规则 ② 追加（拦截塔要靠它指路）
         satelliteLocator = new SatelliteLocator("satellite-locator") {{
             // 探测半径 80 格：与反卫星拦截塔射程一致（探得到就打得到），材料门槛按此定位（另见 2000/秒 的待机耗电）
             requirements(Category.effect, BuildVisibility.shown,

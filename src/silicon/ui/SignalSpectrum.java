@@ -29,7 +29,9 @@ import silicon.world.blocks.signal.SignalSource;
  * 填入文本后外层不会重新加宽——列宽必须固定且按最宽文本预留，标签一律左对齐（居中文本溢出会向
  * 两侧渗透）；整段频谱放进单个嵌套表并对宿主声明 minWidth，杜绝宿主列宽挤压。
  * <p>
- * 性能：5 tick（约 12 Hz）节流刷新；标签 setText / Bar 值每节流周期更新，无逐帧字符串分配。
+ * 性能：5 tick（约 12 Hz）节流刷新；标签 setText 与 Bar 的文本都在节流周期内一次性生成
+ * （Bar 的 {@code Prov<CharSequence>} 是每帧求值的，所以文本必须先落进 {@code effStr} 缓存，
+ * provider 只返回引用——否则每帧都会因 {@code Strings.fixed} 而分配字符串）。
  * 静态缓冲复用（同一时刻只有一个配置面板打开；面板关闭后 update 链随场景移除自动停止）。
  */
 public class SignalSpectrum {
@@ -56,6 +58,19 @@ public class SignalSpectrum {
     private static final Building[] srcBuf = new Building[SignalJammer.CHANNEL_MAX + 1];
     /** 每信道结果所属编码（由 SignalChannel.usableAll 填充；无信号时 null） */
     private static final String[] codeBuf = new String[SignalJammer.CHANNEL_MAX + 1];
+    /**
+     * 有效强度条的文本缓存（节流周期内格式化一次）。
+     * <p>
+     * Bar 的 {@code Prov<CharSequence>} 是**每帧**在绘制时求值的，若直接在 provider 里调
+     * {@link #fmtEff}（内部走 {@code arc.util.Strings.fixed} → BigDecimal + 新建 String），
+     * 面板打开期间就会每帧分配几个字符串。改成节流刷新时预填、provider 只返回引用，
+     * 这样「无逐帧字符串分配」对 Bar 才真正成立（标签侧本来就走节流 setText）。
+     */
+    private static final String[] effStr = new String[SignalJammer.CHANNEL_MAX + 1];
+
+    static {
+        java.util.Arrays.fill(effStr, "");
+    }
     /** 每信道在轨卫星计数（占用列 = 信道拥挤度） */
     private static final int[] satCnt = new int[SignalJammer.CHANNEL_MAX + 1];
     /** 占用计数缓冲：在信道循环**外**一次算完（原先每个信道都要各遍历一遍全部源/中继/干扰器，5×全表） */
@@ -139,9 +154,10 @@ public class SignalSpectrum {
             itf.label.setAlignment(arc.util.Align.center);
             itf.label.setColor(Color.lightGray);
             itfLabels[ch] = itf;
-            // 有效强度条（Prov<CharSequence> 构造器：值标签逐帧渲染，无逐帧分配）
+            // 有效强度条（Prov<CharSequence> 构造器：值标签逐帧渲染；文本取预格式化的 effStr，
+            // 见该字段的注释——不要在 provider 里现调 fmtEff）
             spec.add(new Bar(
-                    () -> fmtEff(effBuf[ci]),
+                    () -> effStr[ci],
                     () -> CH_COLORS[c],
                     () -> effBuf[ci] / (float) SignalSource.MAX_STRENGTH
             )).growX().minWidth(W_BAR_MIN).height(18f).pad(1f);
@@ -205,6 +221,8 @@ public class SignalSpectrum {
                 // 强度列：usableAll 已把卫星层按同一编码 RSS 合成进 effBuf（H 覆盖用的是同一个函数，
                 // 所以 H 上的数字 = 这里最高的一行，两边不会再出现不一致）
                 occLabels[ch].label.setText(Core.bundle.format("block.silicon-signal.spectrum.src", src, jam));
+                // Bar 的文本在这里（节流周期内）一次性格式化好，绘制期只读引用
+                effStr[ch] = fmtEff(effBuf[ch]);
                 // 注意两列口径不同（有意）：本"占用"列只数「直接打在该信道」的干扰器，
                 // 而下面"干扰"列来自 effectiveAll 的 jamA——它含邻信道泄漏（ACIR）与全信道干扰器。
                 // 因此一台只打信道 2 的干扰器会在信道 1 的干扰列显示非 0、占用列显示 0。
