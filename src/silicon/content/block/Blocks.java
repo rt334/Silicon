@@ -20,7 +20,6 @@ import silicon.world.blocks.sandbox.PowerSource;
 import silicon.world.blocks.satellite.SatelliteConsole;
 import silicon.world.blocks.satellite.SatelliteLauncher;
 import silicon.world.blocks.sandbox.MessageTest;
-import silicon.world.blocks.signal.DimensionAnchor;
 import silicon.world.blocks.signal.SatelliteLocator;
 import silicon.world.blocks.signal.SignalDetector;
 import silicon.world.blocks.signal.SignalJammer;
@@ -32,7 +31,7 @@ import static mindustry.type.ItemStack.with;
 public class Blocks {
     public static Block powerGeneratorPump, dualPurposeJunction, dualPurposeStorager,
             rollGenerator, powerProtector, powerSource, mineConverter, theSwitch, itemTransferHub,
-            dimensionAnchor, signalSource, universalJunction, signalRelay, signalJammer,
+            signalSource, universalJunction, signalRelay, signalJammer,
             satelliteLauncher, satelliteConsole, messageTest, signalDetector, asatInterceptor,
             satelliteLocator;
 
@@ -114,10 +113,6 @@ public class Blocks {
                             Items.graphite, 30, Items.silicon, 25, Items.titanium, 15));
             alwaysUnlocked = true;
             size = 3;
-        }};
-        // 已废弃的维度锚点存根：保持原注册位置以保留旧存档方块 ID（隐藏于建造菜单，无功能）
-        dimensionAnchor = new DimensionAnchor("dimension-anchor") {{
-            health = 600;
         }};
         signalSource = new SignalSource("signal-source") {{
             requirements(Category.effect, BuildVisibility.shown,
